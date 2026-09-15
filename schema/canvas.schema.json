@@ -2,9 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mitchpaulus/mcanvas/schema/canvas.schema.json",
   "title": "mcanvas canvas file",
-  "description": "A free-form canvas of Typst-rendered blocks and images. Inspired by Obsidian JSON Canvas but not compatible with it. Source of truth for the Rust side is src/doc.rs; keep the two in sync.",
+  "description": "A free-form canvas of Typst-rendered blocks, images, and tables. Inspired by Obsidian JSON Canvas but not compatible with it. Source of truth for the Rust side is src/doc.rs and src/table.rs; keep them in sync.",
   "type": "object",
-  "required": ["version"],
+  "required": [
+    "version"
+  ],
   "properties": {
     "version": {
       "description": "File format version. Currently 0.",
@@ -28,7 +30,9 @@
     "nodes": {
       "description": "Blocks on the canvas. Defaults to empty.",
       "type": "array",
-      "items": { "$ref": "#/$defs/node" },
+      "items": {
+        "$ref": "#/$defs/node"
+      },
       "default": []
     }
   },
@@ -36,17 +40,37 @@
   "$defs": {
     "view": {
       "type": "object",
-      "required": ["x", "y", "zoom"],
+      "required": [
+        "x",
+        "y",
+        "zoom"
+      ],
       "properties": {
-        "x": { "description": "Canvas x coordinate at the left edge of the window.", "type": "number" },
-        "y": { "description": "Canvas y coordinate at the top edge of the window.", "type": "number" },
-        "zoom": { "description": "Zoom factor. 1 is 100%.", "type": "number", "exclusiveMinimum": 0 }
+        "x": {
+          "description": "Canvas x coordinate at the left edge of the window.",
+          "type": "number"
+        },
+        "y": {
+          "description": "Canvas y coordinate at the top edge of the window.",
+          "type": "number"
+        },
+        "zoom": {
+          "description": "Zoom factor. 1 is 100%.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
       },
       "additionalProperties": true
     },
     "node": {
       "type": "object",
-      "required": ["id", "type", "x", "y", "width"],
+      "required": [
+        "id",
+        "type",
+        "x",
+        "y",
+        "width"
+      ],
       "properties": {
         "id": {
           "description": "Short random identifier, unique within the file. The app generates 8 lowercase hex characters, but any non-empty string is accepted.",
@@ -54,16 +78,33 @@
           "minLength": 1
         },
         "type": {
-          "description": "Node kind. \"typst\" renders `source`; \"image\" displays the file at `src`.",
+          "description": "Node kind. \"typst\" renders `source`; \"image\" displays the file at `src`; \"table\" renders `table` as a Typst table.",
           "type": "string",
-          "enum": ["typst", "image"]
+          "enum": [
+            "typst",
+            "image",
+            "table"
+          ]
         },
-        "x": { "description": "Left edge in canvas units.", "type": "number" },
-        "y": { "description": "Top edge in canvas units.", "type": "number" },
-        "width": { "description": "Width in canvas units.", "type": "number", "exclusiveMinimum": 0 },
+        "x": {
+          "description": "Left edge in canvas units.",
+          "type": "number"
+        },
+        "y": {
+          "description": "Top edge in canvas units.",
+          "type": "number"
+        },
+        "width": {
+          "description": "Width in canvas units.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "height": {
           "description": "Height in canvas units. null or omitted means auto: derived from the Typst render or the image aspect ratio. A number means the user resized it.",
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "default": null
         },
         "source": {
@@ -73,15 +114,210 @@
         "src": {
           "description": "Image path for an \"image\" node, absolute or relative to the canvas file's directory.",
           "type": "string"
+        },
+        "table": {
+          "description": "Table model for a \"table\" node.",
+          "$ref": "#/$defs/table"
         }
       },
       "additionalProperties": true,
       "allOf": [
         {
-          "if": { "properties": { "type": { "const": "image" } } },
-          "then": { "required": ["src"] }
+          "if": {
+            "properties": {
+              "type": {
+                "const": "image"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "src"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "table"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "table"
+            ]
+          }
         }
       ]
+    },
+    "expr": {
+      "description": "A Typst expression copied verbatim into the generated code, e.g. \"0.5pt + gray\", \"center + horizon\", \"none\". A bare hex color such as \"#dbeafe\" is wrapped as rgb(\"#dbeafe\").",
+      "type": "string"
+    },
+    "oneOrMany": {
+      "description": "A single expression, or one per column like Typst's `align: (left, right)`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/expr"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/expr"
+          }
+        }
+      ]
+    },
+    "track": {
+      "description": "Typst track size: \"auto\", a fraction like \"1fr\", or a length like \"80pt\".",
+      "type": "string",
+      "minLength": 1
+    },
+    "cell": {
+      "description": "One cell. A plain string is Typst markup for the body. An object maps to table.cell(..)[body].",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "description": "Typst markup.",
+              "type": "string",
+              "default": ""
+            },
+            "colspan": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rowspan": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "fill": {
+              "$ref": "#/$defs/expr"
+            },
+            "align": {
+              "$ref": "#/$defs/expr"
+            },
+            "stroke": {
+              "$ref": "#/$defs/expr"
+            },
+            "inset": {
+              "$ref": "#/$defs/expr"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "line": {
+      "description": "A table.hline (in `hlines`, `at` is y) or table.vline (in `vlines`, `at` is x).",
+      "type": "object",
+      "required": [
+        "at"
+      ],
+      "properties": {
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stroke": {
+          "$ref": "#/$defs/expr"
+        }
+      },
+      "additionalProperties": true
+    },
+    "table": {
+      "description": "Mirrors Typst's table() so compilation is lossless. Cells are emitted in order and placed automatically, left to right then top to bottom, skipping slots covered by a span. Each inner array of `cells` starts a new grid row.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Column track sizes -> `columns:`. Empty means one auto column per cell in the widest row.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/track"
+          },
+          "default": []
+        },
+        "rows": {
+          "description": "Row track sizes -> `rows:`. Empty means auto.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/track"
+          },
+          "default": []
+        },
+        "header": {
+          "description": "Number of leading rows wrapped in table.header(..).",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "footer": {
+          "description": "Number of trailing rows wrapped in table.footer(..).",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "bold_header": {
+          "description": "Emit a show rule that renders header rows in bold.",
+          "type": "boolean",
+          "default": true
+        },
+        "align": {
+          "$ref": "#/$defs/oneOrMany"
+        },
+        "fill": {
+          "$ref": "#/$defs/oneOrMany"
+        },
+        "stroke": {
+          "$ref": "#/$defs/expr"
+        },
+        "inset": {
+          "$ref": "#/$defs/expr"
+        },
+        "gutter": {
+          "$ref": "#/$defs/expr"
+        },
+        "hlines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          },
+          "default": []
+        },
+        "vlines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/line"
+          },
+          "default": []
+        },
+        "cells": {
+          "description": "Rows of cells in emission order.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/cell"
+            }
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": true
     }
   }
 }
