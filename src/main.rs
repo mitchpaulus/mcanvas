@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod doc;
 mod render;
 
@@ -26,7 +28,6 @@ struct App {
     selected: Option<usize>,
     drag_orig: Option<(f64, f64)>,
     resize_orig: Option<f64>,
-    quit_armed: bool,
     message: String,
     renderer: Renderer,
     model: Rc<VecModel<NodeVm>>,
@@ -137,7 +138,6 @@ impl App {
             self.dirty = true;
             self.dirty_since = Some(Instant::now());
         }
-        self.quit_armed = false;
     }
 
     fn save(&mut self) -> Result<(), String> {
@@ -149,8 +149,109 @@ impl App {
         self.path = Some(path);
         self.dirty = false;
         self.dirty_since = None;
-        self.quit_armed = false;
         Ok(())
+    }
+
+    /// Replace the document and reset all editing state.
+    fn load_doc(&mut self, doc: Canvas, path: Option<PathBuf>, ui: &MainWindow) {
+        ui.set_pan_x(doc.view.x as f32);
+        ui.set_pan_y(doc.view.y as f32);
+        ui.set_zoom(doc.view.zoom as f32);
+        self.doc = doc;
+        self.path = path;
+        self.dirty = false;
+        self.dirty_since = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = None;
+        self.drag_orig = None;
+        self.resize_orig = None;
+        self.message.clear();
+        self.refresh_all();
+    }
+
+    fn store_view(&mut self, ui: &MainWindow) {
+        self.doc.view.x = ui.get_pan_x() as f64;
+        self.doc.view.y = ui.get_pan_y() as f64;
+        self.doc.view.zoom = ui.get_zoom() as f64;
+    }
+
+    fn save_as_dialog(&self) -> Option<PathBuf> {
+        let mut d = rfd::FileDialog::new()
+            .add_filter("canvas", &["json"])
+            .set_directory(self.root_dir());
+        if let Some(name) = self.path.as_ref().and_then(|p| p.file_name()) {
+            d = d.set_file_name(name.to_string_lossy());
+        } else {
+            d = d.set_file_name("untitled.canvas.json");
+        }
+        d.save_file()
+    }
+
+    /// Save to the current path, or prompt for one. Returns false if cancelled.
+    fn save_interactive(&mut self, ui: &MainWindow, force_prompt: bool) -> bool {
+        if self.path.is_none() || force_prompt {
+            match self.save_as_dialog() {
+                Some(p) => self.path = Some(p),
+                None => return false,
+            }
+        }
+        self.store_view(ui);
+        match self.save() {
+            Ok(()) => {
+                self.message = "saved".into();
+                true
+            }
+            Err(e) => {
+                self.message = format!("save failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Ask what to do with unsaved changes. Returns true if it is OK to proceed.
+    fn confirm_discard(&mut self, ui: &MainWindow) -> bool {
+        if !self.dirty {
+            return true;
+        }
+        use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+        let r = MessageDialog::new()
+            .set_title("mcanvas")
+            .set_level(MessageLevel::Warning)
+            .set_description("The canvas has unsaved changes. Save them?")
+            .set_buttons(MessageButtons::YesNoCancel)
+            .show();
+        match r {
+            MessageDialogResult::Yes => self.save_interactive(ui, false),
+            MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
+    /// Zoom and pan so every node is visible.
+    fn zoom_fit(&self, ui: &MainWindow) {
+        if self.doc.nodes.is_empty() {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (i, n) in self.doc.nodes.iter().enumerate() {
+            let h = self.model.row_data(i).map(|v| v.h as f64).unwrap_or(0.0);
+            x0 = x0.min(n.x);
+            y0 = y0.min(n.y);
+            x1 = x1.max(n.x + n.width);
+            y1 = y1.max(n.y + h);
+        }
+        let pad = 40.0;
+        let vw = ui.get_view_width() as f64;
+        let vh = ui.get_view_height() as f64;
+        let bw = (x1 - x0).max(1.0);
+        let bh = (y1 - y0).max(1.0);
+        let z = ((vw - 2.0 * pad) / bw)
+            .min((vh - 2.0 * pad) / bh)
+            .clamp(0.1, 8.0);
+        ui.set_zoom(z as f32);
+        ui.set_pan_x(((vw - bw * z) / 2.0 - x0 * z) as f32);
+        ui.set_pan_y(((vh - bh * z) / 2.0 - y0 * z) as f32);
     }
 
     fn add_node(&mut self, x: f64, y: f64) -> usize {
@@ -296,7 +397,6 @@ fn main() {
         selected: None,
         drag_orig: None,
         resize_orig: None,
-        quit_armed: false,
         message: String::new(),
         renderer: Renderer::new(),
         model,
@@ -452,57 +552,13 @@ fn main() {
         let k = key.as_str();
         let is = |k2: slint::platform::Key| SharedString::from(k2) == text;
         use slint::platform::Key;
-        let zoom_step = |u: &MainWindow, f: f32| {
-            let z = (u.get_zoom() * f).clamp(0.1, 8.0);
-            let f = z / u.get_zoom();
-            u.invoke_zoom_at(f, u.get_view_width() / 2.0, u.get_view_height() / 2.0);
-        };
         if ctrl {
-            match k {
-                "s" | "S" => {
-                    a.doc.view.x = u.get_pan_x() as f64;
-                    a.doc.view.y = u.get_pan_y() as f64;
-                    a.doc.view.zoom = u.get_zoom() as f64;
-                    match a.save() {
-                        Ok(()) => a.message = "saved".into(),
-                        Err(e) => a.message = format!("save failed: {e}"),
-                    }
-                }
-                "n" | "N" => {
-                    let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
-                    let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();
-                    let i = a.add_node(x as f64 - DEFAULT_WIDTH / 2.0, y as f64);
-                    u.invoke_begin_edit(i as i32, SharedString::default());
-                }
-                "z" | "Z" => {
-                    if shift {
-                        a.redo()
-                    } else {
-                        a.undo()
-                    }
-                }
-                "y" | "Y" => a.redo(),
-                "=" | "+" => zoom_step(&u, 1.25),
-                "-" | "_" => zoom_step(&u, 0.8),
-                "0" => {
-                    let f = 1.0 / u.get_zoom();
-                    u.invoke_zoom_at(f, u.get_view_width() / 2.0, u.get_view_height() / 2.0);
-                }
-                "q" | "Q" => {
-                    if !a.dirty || a.quit_armed {
-                        a.doc.view.x = u.get_pan_x() as f64;
-                        a.doc.view.y = u.get_pan_y() as f64;
-                        a.doc.view.zoom = u.get_zoom() as f64;
-                        slint::quit_event_loop().ok();
-                    } else {
-                        a.quit_armed = true;
-                        a.message =
-                            "unsaved changes: Ctrl+Q again to discard, Ctrl+S to save".into();
-                    }
-                }
-                _ => return false,
+            // Most Ctrl shortcuts are declared on the menu bar and never reach here.
+            if shift && (k == "z" || k == "Z") {
+                a.redo();
+                return true;
             }
-            return true;
+            return false;
         }
         if is(Key::Delete) || is(Key::Backspace) {
             a.delete_selected();
@@ -533,18 +589,94 @@ fn main() {
         true
     });
 
-    // Close button: same two-step confirm as Ctrl+Q.
+    hook!(on_command, |a, u, name| {
+        let editing = u.get_edit_index() >= 0;
+        let zoom_step = |u: &MainWindow, f: f32| {
+            let z = (u.get_zoom() * f).clamp(0.1, 8.0);
+            let f = z / u.get_zoom();
+            u.invoke_zoom_at(f, u.get_view_width() / 2.0, u.get_view_height() / 2.0);
+        };
+        match name.as_str() {
+            "new" => {
+                if editing {
+                    u.invoke_end_edit();
+                }
+                if a.confirm_discard(&u) {
+                    a.load_doc(Canvas::default(), None, &u);
+                }
+            }
+            "open" => {
+                if editing {
+                    u.invoke_end_edit();
+                }
+                if !a.confirm_discard(&u) {
+                    return;
+                }
+                let picked = rfd::FileDialog::new()
+                    .add_filter("canvas", &["json"])
+                    .set_directory(a.root_dir())
+                    .pick_file();
+                if let Some(p) = picked {
+                    match Canvas::load(&p) {
+                        Ok(d) => a.load_doc(d, Some(p), &u),
+                        Err(e) => a.message = format!("failed to load {}: {e}", p.display()),
+                    }
+                }
+            }
+            "save" => {
+                a.save_interactive(&u, false);
+            }
+            "save-as" => {
+                a.save_interactive(&u, true);
+            }
+            "quit" => {
+                if a.confirm_discard(&u) {
+                    slint::quit_event_loop().ok();
+                }
+            }
+            "undo" if !editing => a.undo(),
+            "redo" if !editing => a.redo(),
+            "add-node" if !editing => {
+                let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
+                let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();
+                let i = a.add_node(x as f64 - DEFAULT_WIDTH / 2.0, y as f64);
+                u.invoke_begin_edit(i as i32, SharedString::default());
+            }
+            "edit-node" if !editing => {
+                if let Some(i) = a.selected {
+                    u.invoke_begin_edit(i as i32, a.doc.nodes[i].source.clone().into());
+                }
+            }
+            "delete" if !editing => a.delete_selected(),
+            "zoom-in" => zoom_step(&u, 1.25),
+            "zoom-out" => zoom_step(&u, 0.8),
+            "zoom-100" => {
+                let f = 1.0 / u.get_zoom();
+                u.invoke_zoom_at(f, u.get_view_width() / 2.0, u.get_view_height() / 2.0);
+            }
+            "zoom-fit" => a.zoom_fit(&u),
+            "reset-view" => {
+                u.set_zoom(1.0);
+                u.set_pan_x(0.0);
+                u.set_pan_y(0.0);
+            }
+            _ => {}
+        }
+        if !editing {
+            u.invoke_focus_canvas();
+        }
+    });
+
+    // Close button: confirm when dirty.
     {
         let app = app.clone();
         let weak = ui.as_weak();
         ui.window().on_close_requested(move || {
             let u = weak.unwrap();
             let mut a = app.borrow_mut();
-            if !a.dirty || a.quit_armed {
+            if a.confirm_discard(&u) {
                 slint::CloseRequestResponse::HideWindow
             } else {
-                a.quit_armed = true;
-                a.message = "unsaved changes: close again to discard, Ctrl+S to save".into();
                 status(&a, &u);
                 slint::CloseRequestResponse::KeepWindowShown
             }

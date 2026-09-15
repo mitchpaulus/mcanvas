@@ -11,6 +11,8 @@ use typst::{Library, LibraryExt, World};
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 
+const PT_PER_PX: f64 = 0.75;
+
 pub struct Renderer {
     library: LazyHash<Library>,
     fonts: FontStore,
@@ -41,8 +43,12 @@ impl Renderer {
         source: &str,
         width: f64,
     ) -> Result<Rendered, String> {
+        // Page size in points such that 1 logical pixel = 0.75pt, matching how
+        // usvg converts pt to px, so the SVG maps 1:1 on screen at zoom 1.
+        let width_pt = width * PT_PER_PX;
+        let margin_pt = 8.0 * PT_PER_PX;
         let prefix = format!(
-            "#set page(width: {width}pt, height: auto, margin: 8pt, fill: none)\n\
+            "#set page(width: {width_pt}pt, height: auto, margin: {margin_pt}pt, fill: none)\n\
              #set text(size: 12pt)\n{preamble}\n"
         );
         let prefix_lines = prefix.matches('\n').count();
@@ -68,8 +74,8 @@ impl Renderer {
                 let svg = typst_svg::svg(page, &typst_svg::SvgOptions::default());
                 Ok(Rendered {
                     svg,
-                    width: page.frame.width().to_pt(),
-                    height: page.frame.height().to_pt(),
+                    width: page.frame.width().to_pt() / PT_PER_PX,
+                    height: page.frame.height().to_pt() / PT_PER_PX,
                 })
             }
             Err(errors) => {

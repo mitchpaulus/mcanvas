@@ -9,6 +9,37 @@ export struct NodeVm {
     selected: bool,
 }
 
+// Flat icon button for the toolbar. Built from scratch rather than on the
+// std Button so the icon is exactly centered and the size is predictable.
+component ToolButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> tip;
+    callback clicked;
+
+    width: 30px;
+    height: 30px;
+    border-radius: 4px;
+    background: ta.pressed ? #cfcfcb : ta.has-hover ? #dededa : transparent;
+    accessible-role: button;
+    accessible-label: tip;
+
+    Image {
+        source: root.icon;
+        width: 18px;
+        height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+        colorize: #333;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Tooltip {
+        text: @markdown("\{root.tip}");
+    }
+}
+
 export component MainWindow inherits Window {
     title: "mcanvas";
     preferred-width: 1200px;
@@ -36,6 +67,8 @@ export component MainWindow inherits Window {
     callback commit-edit(int, string);
     callback cancel-edit();
     callback key(string, bool, bool) -> bool;
+    // Menu and toolbar actions, identified by name ("save", "zoom-fit", ...).
+    callback command(string);
 
     public function begin-edit(i: int, text: string) {
         root.edit-index = i;
@@ -55,7 +88,66 @@ export component MainWindow inherits Window {
         root.zoom = root.zoom * f;
     }
 
+    MenuBar {
+        Menu {
+            title: "File";
+            MenuItem { title: "New"; shortcut: @keys(Control + N); activated => { root.command("new"); } }
+            MenuItem { title: "Open..."; shortcut: @keys(Control + O); activated => { root.command("open"); } }
+            MenuSeparator {}
+            MenuItem { title: "Save"; shortcut: @keys(Control + S); activated => { root.command("save"); } }
+            MenuItem { title: "Save As..."; shortcut: @keys(Control + Shift + S); activated => { root.command("save-as"); } }
+            MenuSeparator {}
+            MenuItem { title: "Quit"; shortcut: @keys(Control + Q); activated => { root.command("quit"); } }
+        }
+        Menu {
+            title: "Edit";
+            MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.command("undo"); } }
+            MenuItem { title: "Redo"; shortcut: @keys(Control + Y); activated => { root.command("redo"); } }
+            MenuSeparator {}
+            MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
+            MenuItem { title: "Edit Node"; activated => { root.command("edit-node"); } }
+            MenuItem { title: "Delete Node"; activated => { root.command("delete"); } }
+        }
+        Menu {
+            title: "View";
+            MenuItem { title: "Zoom In"; shortcut: @keys(Control + Equals); activated => { root.command("zoom-in"); } }
+            MenuItem { title: "Zoom Out"; shortcut: @keys(Control + HyphenMinus); activated => { root.command("zoom-out"); } }
+            MenuItem { title: "Actual Size"; shortcut: @keys(Control + Digit0); activated => { root.command("zoom-100"); } }
+            MenuItem { title: "Zoom to Fit"; shortcut: @keys(Control + F); activated => { root.command("zoom-fit"); } }
+            MenuSeparator {}
+            MenuItem { title: "Reset View"; activated => { root.command("reset-view"); } }
+        }
+    }
+
     VerticalLayout {
+        // Toolbar / ribbon row.
+        Rectangle {
+            background: #ececea;
+            height: 38px;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 2px;
+                alignment: start;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                ToolButton { icon: @image-url("icons/new.svg"); tip: "New"; clicked => { root.command("new"); } }
+                ToolButton { icon: @image-url("icons/open.svg"); tip: "Open"; clicked => { root.command("open"); } }
+                ToolButton { icon: @image-url("icons/save.svg"); tip: "Save"; clicked => { root.command("save"); } }
+                Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
+                ToolButton { icon: @image-url("icons/undo.svg"); tip: "Undo"; clicked => { root.command("undo"); } }
+                ToolButton { icon: @image-url("icons/redo.svg"); tip: "Redo"; clicked => { root.command("redo"); } }
+                Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
+                ToolButton { icon: @image-url("icons/add-node.svg"); tip: "Add node"; clicked => { root.command("add-node"); } }
+                ToolButton { icon: @image-url("icons/delete.svg"); tip: "Delete node"; clicked => { root.command("delete"); } }
+                Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
+                ToolButton { icon: @image-url("icons/zoom-in.svg"); tip: "Zoom in"; clicked => { root.command("zoom-in"); } }
+                ToolButton { icon: @image-url("icons/zoom-out.svg"); tip: "Zoom out"; clicked => { root.command("zoom-out"); } }
+                ToolButton { icon: @image-url("icons/zoom-100.svg"); tip: "Actual size"; clicked => { root.command("zoom-100"); } }
+                ToolButton { icon: @image-url("icons/zoom-fit.svg"); tip: "Zoom to fit"; clicked => { root.command("zoom-fit"); } }
+            }
+        }
+
         canvas := Rectangle {
             background: #f4f4f2;
             clip: true;
@@ -107,11 +199,14 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                for n[i] in root.nodes : Rectangle {
-                    x: root.pan-x + n.x * root.zoom;
-                    y: root.pan-y + n.y * root.zoom;
-                    width: n.w * root.zoom;
-                    height: n.h * root.zoom;
+                // Node geometry is snapped to whole physical pixels. The SVG
+                // is rasterized at the element's pixel size, and a fractional
+                // position or size makes the GPU resample it, which blurs text.
+                for n[i] in root.nodes : node := Rectangle {
+                    x: round((root.pan-x + n.x * root.zoom) / 1phx) * 1phx;
+                    y: round((root.pan-y + n.y * root.zoom) / 1phx) * 1phx;
+                    width: round(n.w * root.zoom / 1phx) * 1phx;
+                    height: round(n.h * root.zoom / 1phx) * 1phx;
                     background: white;
                     border-width: n.selected ? 2px : 1px;
                     border-color: n.selected ? #3b82f6 : #c8c8c8;
@@ -133,9 +228,17 @@ export component MainWindow inherits Window {
                         wrap: word-wrap;
                         font-size: 11px * root.zoom;
                     }
+                    // Drag. Mouse positions are measured in canvas coordinates
+                    // (node.x + local mouse-x), not in this TouchArea's own
+                    // coordinates, because the TouchArea moves with the node
+                    // while dragging, which would feed back into the delta.
                     TouchArea {
+                        property <length> start-x;
+                        property <length> start-y;
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down) {
+                                self.start-x = node.x + self.mouse-x;
+                                self.start-y = node.y + self.mouse-y;
                                 root.node-pressed(i);
                                 keys.focus();
                             }
@@ -146,28 +249,34 @@ export component MainWindow inherits Window {
                         moved => {
                             if (self.pressed) {
                                 root.node-drag(i,
-                                    (self.mouse-x - self.pressed-x) / root.zoom,
-                                    (self.mouse-y - self.pressed-y) / root.zoom);
+                                    (node.x + self.mouse-x - self.start-x) / root.zoom,
+                                    (node.y + self.mouse-y - self.start-y) / root.zoom);
                             }
                         }
                         double-clicked => {
                             root.node-edit-request(i);
                         }
                     }
-                    TouchArea {
+                    // Width resize handle. Same canvas-coordinate trick: the
+                    // handle sits at the right edge and moves as the width changes.
+                    handle := TouchArea {
+                        property <length> start-x;
                         x: parent.width - 12px;
                         y: parent.height - 12px;
                         width: 12px;
                         height: 12px;
                         mouse-cursor: ew-resize;
                         pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                self.start-x = node.x + self.x + self.mouse-x;
+                            }
                             if (e.kind == PointerEventKind.up) {
                                 root.node-resize-end(i);
                             }
                         }
                         moved => {
                             if (self.pressed) {
-                                root.node-resize(i, (self.mouse-x - self.pressed-x) / root.zoom);
+                                root.node-resize(i, (node.x + self.x + self.mouse-x - self.start-x) / root.zoom);
                             }
                         }
                         Rectangle {

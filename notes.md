@@ -122,12 +122,24 @@ Working:
   resets), node drag with grid snap on drop, width resize via bottom-right handle.
 - Edit mode: double-click or Enter opens a raw-source box; Ctrl+Enter commits,
   Esc cancels (an empty new node is discarded on cancel).
-- Ctrl+N or double-click empty space creates a node. Delete removes the selection.
+- Ctrl+Shift+N or double-click empty space creates a node. Delete removes the selection.
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y). Snapshot based for now, not
   command based as the architecture section proposed; fine at this scale.
 - Spatial navigation with arrow keys using the cone-and-score rule above.
-- Save with Ctrl+S. Ctrl+Q or the close button warns once when dirty; a second
-  press discards. A reminder appears in the status bar after 10 minutes unsaved.
+- Menu bar (File / Edit / View) with shortcuts declared on the menu items, and a
+  toolbar row of icon buttons (`ui/icons/*.svg`). Both route through one
+  `command(string)` callback handled in `main.rs`.
+- File: New (Ctrl+N), Open (Ctrl+O), Save (Ctrl+S), Save As (Ctrl+Shift+S), Quit
+  (Ctrl+Q). Native file and "save changes?" dialogs via `rfd`. Quit and the close
+  button ask Yes/No/Cancel when dirty. A reminder appears in the status bar after
+  10 minutes unsaved.
+- View: zoom in/out (Ctrl+= / Ctrl+-), actual size (Ctrl+0), zoom to fit (Ctrl+F),
+  reset view.
+- Node drag and resize measure the mouse in canvas coordinates (`node.x +
+  mouse-x`) rather than TouchArea-local ones, since the TouchArea moves with the
+  node; local deltas fed back into the position and made it jump.
+- `#![windows_subsystem = "windows"]` so no console window opens on Windows
+  (stderr output is therefore invisible there).
 - Image nodes (`type: "image"`, `src` relative to the canvas file) load via Slint.
 
 Not yet:

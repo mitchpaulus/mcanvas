@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rfd = "0.17"
 slint = "1.17"
 typst = "0.15"
 typst-layout = "0.15"
