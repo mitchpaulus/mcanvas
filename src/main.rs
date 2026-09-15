@@ -459,10 +459,15 @@ fn main() {
         };
         if ctrl {
             match k {
-                "s" | "S" => match a.save() {
-                    Ok(()) => a.message = "saved".into(),
-                    Err(e) => a.message = format!("save failed: {e}"),
-                },
+                "s" | "S" => {
+                    a.doc.view.x = u.get_pan_x() as f64;
+                    a.doc.view.y = u.get_pan_y() as f64;
+                    a.doc.view.zoom = u.get_zoom() as f64;
+                    match a.save() {
+                        Ok(()) => a.message = "saved".into(),
+                        Err(e) => a.message = format!("save failed: {e}"),
+                    }
+                }
                 "n" | "N" => {
                     let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
                     let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();

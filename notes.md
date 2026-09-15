@@ -134,4 +134,3 @@ Not yet:
 - Manual height (`height` is respected if set in JSON, but there is no UI for it).
 - Inline base64 images.
 - Off-thread rendering; compiles run on the UI thread and are fast enough so far.
-- The view position is saved only on Ctrl+Q, not on Ctrl+S.
