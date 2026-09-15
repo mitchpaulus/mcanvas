@@ -86,6 +86,8 @@ export component MainWindow inherits Window {
     callback node-resize(int, length);
     callback node-resize-end(int);
     callback node-edit-request(int);
+    // Node context menu: "edit", "copy-typst", "delete".
+    callback node-menu(string, int);
     callback background-clicked();
     callback background-double-clicked(length, length);
     callback commit-edit(int, string);
@@ -299,6 +301,14 @@ export component MainWindow inherits Window {
                             root.node-edit-request(i);
                         }
                     }
+                    ContextMenuArea {
+                        Menu {
+                            MenuItem { title: "Edit"; activated => { root.node-menu("edit", i); } }
+                            MenuItem { title: "Copy as Typst"; activated => { root.node-menu("copy-typst", i); } }
+                            MenuSeparator {}
+                            MenuItem { title: "Delete"; activated => { root.node-menu("delete", i); } }
+                        }
+                    }
                     // Width resize handle. Same canvas-coordinate trick: the
                     // handle sits at the right edge and moves as the width changes.
                     handle := TouchArea {
@@ -333,7 +343,8 @@ export component MainWindow inherits Window {
                     x: root.edit-index >= 0 ? root.pan-x + root.nodes[root.edit-index].x * root.zoom : 0;
                     y: root.edit-index >= 0 ? root.pan-y + root.nodes[root.edit-index].y * root.zoom : 0;
                     width: root.edit-index >= 0 ? max(root.nodes[root.edit-index].w * root.zoom, 320px) : 0;
-                    height: root.edit-index >= 0 ? max(root.nodes[root.edit-index].h * root.zoom, 160px) : 0;
+                    // Grow with the text so the caret never runs off the bottom.
+                    height: root.edit-index >= 0 ? max(root.nodes[root.edit-index].h * root.zoom, 160px, edit-input.preferred-height + 24px) : 0;
                     background: #fffbe6;
                     border-color: #e0a800;
                     border-width: 2px;

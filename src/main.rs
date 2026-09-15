@@ -318,6 +318,29 @@ impl App {
         i
     }
 
+    /// The node as standalone Typst markup, for the clipboard.
+    fn node_as_typst(&self, i: usize) -> String {
+        let n = &self.doc.nodes[i];
+        match n.kind.as_str() {
+            "table" => n.table.as_ref().map(Table::to_typst).unwrap_or_default(),
+            "image" => format!("#image(\"{}\")\n", n.src.clone().unwrap_or_default()),
+            _ => {
+                let mut s = n.source.clone();
+                if !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s
+            }
+        }
+    }
+
+    fn copy_to_clipboard(&mut self, text: String) {
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+            Ok(()) => self.message = "copied as Typst".into(),
+            Err(e) => self.message = format!("clipboard error: {e}"),
+        }
+    }
+
     /// Open the editor appropriate for the node's kind.
     fn open_editor(&mut self, ui: &MainWindow, i: usize) {
         self.selected = Some(i);
@@ -718,6 +741,25 @@ fn main() {
 
     hook!(on_node_edit_request, |a, u, i| {
         a.open_editor(&u, i as usize);
+    });
+
+    hook!(on_node_menu, |a, u, op, i| {
+        let i = i as usize;
+        if i >= a.doc.nodes.len() {
+            return;
+        }
+        match op.as_str() {
+            "edit" => a.open_editor(&u, i),
+            "copy-typst" => {
+                let text = a.node_as_typst(i);
+                a.copy_to_clipboard(text);
+            }
+            "delete" => {
+                a.selected = Some(i);
+                a.delete_selected();
+            }
+            _ => {}
+        }
     });
 
     hook!(on_table_cell_edited, |a, _u, k, text| {
