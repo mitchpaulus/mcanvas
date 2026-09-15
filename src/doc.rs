@@ -3,6 +3,10 @@ use std::path::Path;
 
 pub const GRID: f64 = 8.0;
 
+// The on-disk JSON format is described by schema/canvas.schema.json.
+// When you change `Canvas`, `View`, or `Node` (fields, defaults, renames), update
+// the schema in the same commit and re-run `cargo test`.
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct View {
     pub x: f64,
@@ -88,4 +92,41 @@ pub fn new_id() -> String {
     (0..8)
         .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_file_matches_document_model() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/demo.canvas.json"));
+        let canvas = Canvas::load(path).expect("demo file should parse");
+        assert_eq!(canvas.version, 0);
+        assert!(!canvas.nodes.is_empty());
+        for n in &canvas.nodes {
+            assert!(matches!(n.kind.as_str(), "typst" | "image"), "unknown node type {}", n.kind);
+            if n.kind == "image" {
+                assert!(n.src.is_some(), "image node {} needs src", n.id);
+            }
+        }
+        // Round trip must not lose anything.
+        let text = serde_json::to_string(&canvas).unwrap();
+        let back: Canvas = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.nodes, canvas.nodes);
+    }
+
+    #[test]
+    fn schema_required_and_defaults_match_struct() {
+        // Mirrors schema/canvas.schema.json: only `version` is required at the top level,
+        // and a node needs id/type/x/y/width.
+        let c: Canvas = serde_json::from_str(r#"{"version":0}"#).unwrap();
+        assert_eq!(c.grid, GRID);
+        assert_eq!(c.view.zoom, 1.0);
+        let n: Node =
+            serde_json::from_str(r#"{"id":"a","type":"typst","x":0,"y":0,"width":10}"#).unwrap();
+        assert_eq!(n.height, None);
+        assert_eq!(n.source, "");
+        assert!(serde_json::from_str::<Node>(r#"{"id":"a","type":"typst"}"#).is_err());
+    }
 }

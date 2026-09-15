@@ -50,6 +50,11 @@ Companion to `design.md`. Captures decisions made so far and a proposed plan.
 
 ## File format sketch (v0)
 
+The authoritative description is `schema/canvas.schema.json` (JSON Schema 2020-12).
+It mirrors the serde structs in `src/doc.rs`; change both together. Validate a file with
+`check-jsonschema --schemafile schema/canvas.schema.json file.canvas.json` or any
+2020-12 validator.
+
 ```json
 {
   "version": 0,

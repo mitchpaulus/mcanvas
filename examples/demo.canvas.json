@@ -1,4 +1,5 @@
 {
+  "$schema": "../schema/canvas.schema.json",
   "version": 0,
   "grid": 8,
   "view": { "x": 40, "y": 40, "zoom": 1.0 },

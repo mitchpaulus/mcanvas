@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mitchpaulus/mcanvas/schema/canvas.schema.json",
+  "title": "mcanvas canvas file",
+  "description": "A free-form canvas of Typst-rendered blocks and images. Inspired by Obsidian JSON Canvas but not compatible with it. Source of truth for the Rust side is src/doc.rs; keep the two in sync.",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "description": "File format version. Currently 0.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "grid": {
+      "description": "Snap grid size in canvas units. 0 or negative disables snapping. Defaults to 8 when omitted.",
+      "type": "number",
+      "default": 8
+    },
+    "view": {
+      "description": "Saved viewport. Defaults to origin at zoom 1 when omitted.",
+      "$ref": "#/$defs/view"
+    },
+    "preamble": {
+      "description": "Typst source prepended to every node before compiling (fonts, colors, #let helpers). Defaults to empty.",
+      "type": "string",
+      "default": ""
+    },
+    "nodes": {
+      "description": "Blocks on the canvas. Defaults to empty.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" },
+      "default": []
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "view": {
+      "type": "object",
+      "required": ["x", "y", "zoom"],
+      "properties": {
+        "x": { "description": "Canvas x coordinate at the left edge of the window.", "type": "number" },
+        "y": { "description": "Canvas y coordinate at the top edge of the window.", "type": "number" },
+        "zoom": { "description": "Zoom factor. 1 is 100%.", "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "type", "x", "y", "width"],
+      "properties": {
+        "id": {
+          "description": "Short random identifier, unique within the file. The app generates 8 lowercase hex characters, but any non-empty string is accepted.",
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "description": "Node kind. \"typst\" renders `source`; \"image\" displays the file at `src`.",
+          "type": "string",
+          "enum": ["typst", "image"]
+        },
+        "x": { "description": "Left edge in canvas units.", "type": "number" },
+        "y": { "description": "Top edge in canvas units.", "type": "number" },
+        "width": { "description": "Width in canvas units.", "type": "number", "exclusiveMinimum": 0 },
+        "height": {
+          "description": "Height in canvas units. null or omitted means auto: derived from the Typst render or the image aspect ratio. A number means the user resized it.",
+          "type": ["number", "null"],
+          "default": null
+        },
+        "source": {
+          "description": "Typst source for a \"typst\" node. Omitted when empty.",
+          "type": "string"
+        },
+        "src": {
+          "description": "Image path for an \"image\" node, absolute or relative to the canvas file's directory.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "image" } } },
+          "then": { "required": ["src"] }
+        }
+      ]
+    }
+  }
+}
