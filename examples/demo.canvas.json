@@ -1,0 +1,44 @@
+{
+  "version": 0,
+  "grid": 8,
+  "view": { "x": 40, "y": 40, "zoom": 1.0 },
+  "preamble": "#set text(font: \"Libertinus Serif\")",
+  "nodes": [
+    {
+      "id": "a1b2c3d4",
+      "type": "typst",
+      "x": 0,
+      "y": 0,
+      "width": 360,
+      "height": null,
+      "source": "= mcanvas demo\n\nA free-form canvas where every block is Typst.\n\n- bullet one\n- bullet two\n  - nested\n- *bold* and _italic_"
+    },
+    {
+      "id": "e5f60718",
+      "type": "typst",
+      "x": 400,
+      "y": 0,
+      "width": 320,
+      "height": null,
+      "source": "== Math\n\n$ integral_0^1 x^2 dif x = 1/3 $\n\nInline math like $a^2 + b^2 = c^2$ works too."
+    },
+    {
+      "id": "9a0b1c2d",
+      "type": "typst",
+      "x": 0,
+      "y": 240,
+      "width": 360,
+      "height": null,
+      "source": "== Code\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```"
+    },
+    {
+      "id": "3e4f5061",
+      "type": "typst",
+      "x": 400,
+      "y": 240,
+      "width": 320,
+      "height": null,
+      "source": "== Shortcuts\n\n/ Ctrl+N: new block\n/ Enter: edit selected\n/ Ctrl+Enter: commit edit\n/ Esc: cancel edit\n/ Arrows: move selection spatially\n/ Ctrl+Z, Ctrl+Shift+Z: undo, redo\n/ Ctrl+S: save\n/ Ctrl+wheel: zoom\n/ Del: delete block"
+    }
+  ]
+}

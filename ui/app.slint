@@ -1,0 +1,236 @@
+export struct NodeVm {
+    id: string,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    img: image,
+    error: string,
+    selected: bool,
+}
+
+export component MainWindow inherits Window {
+    title: "mcanvas";
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    forward-focus: keys;
+
+    in-out property <[NodeVm]> nodes;
+    in-out property <length> pan-x: 0;
+    in-out property <length> pan-y: 0;
+    in-out property <float> zoom: 1.0;
+    in-out property <int> edit-index: -1;
+    in-out property <string> status-left;
+    in-out property <string> status-right;
+    out property <length> view-width: canvas.width;
+    out property <length> view-height: canvas.height;
+
+    callback node-pressed(int);
+    callback node-drag(int, length, length);
+    callback node-drag-end(int);
+    callback node-resize(int, length);
+    callback node-resize-end(int);
+    callback node-edit-request(int);
+    callback background-clicked();
+    callback background-double-clicked(length, length);
+    callback commit-edit(int, string);
+    callback cancel-edit();
+    callback key(string, bool, bool) -> bool;
+
+    public function begin-edit(i: int, text: string) {
+        root.edit-index = i;
+        edit-input.text = text;
+        edit-input.focus();
+    }
+    public function end-edit() {
+        root.edit-index = -1;
+        keys.focus();
+    }
+    public function focus-canvas() {
+        keys.focus();
+    }
+    public function zoom-at(f: float, sx: length, sy: length) {
+        root.pan-x = sx - (sx - root.pan-x) * f;
+        root.pan-y = sy - (sy - root.pan-y) * f;
+        root.zoom = root.zoom * f;
+    }
+
+    VerticalLayout {
+        canvas := Rectangle {
+            background: #f4f4f2;
+            clip: true;
+
+            keys := FocusScope {
+                key-pressed(e) => {
+                    if (root.key(e.text, e.modifiers.control, e.modifiers.shift)) {
+                        return accept;
+                    }
+                    reject
+                }
+
+                bg := TouchArea {
+                    property <length> start-pan-x;
+                    property <length> start-pan-y;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            self.start-pan-x = root.pan-x;
+                            self.start-pan-y = root.pan-y;
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                            root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                        }
+                    }
+                    clicked => {
+                        root.background-clicked();
+                        keys.focus();
+                    }
+                    double-clicked => {
+                        root.background-double-clicked(
+                            (self.mouse-x - root.pan-x) / root.zoom,
+                            (self.mouse-y - root.pan-y) / root.zoom);
+                    }
+                    scroll-event(e) => {
+                        if (e.modifiers.control) {
+                            root.zoom-at(
+                                clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom,
+                                self.mouse-x, self.mouse-y);
+                        } else if (e.modifiers.shift) {
+                            root.pan-x += e.delta-y + e.delta-x;
+                        } else {
+                            root.pan-x += e.delta-x;
+                            root.pan-y += e.delta-y;
+                        }
+                        accept
+                    }
+                }
+
+                for n[i] in root.nodes : Rectangle {
+                    x: root.pan-x + n.x * root.zoom;
+                    y: root.pan-y + n.y * root.zoom;
+                    width: n.w * root.zoom;
+                    height: n.h * root.zoom;
+                    background: white;
+                    border-width: n.selected ? 2px : 1px;
+                    border-color: n.selected ? #3b82f6 : #c8c8c8;
+                    border-radius: 3px;
+                    clip: true;
+
+                    Image {
+                        source: n.img;
+                        x: 0; y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: fill;
+                    }
+                    if n.error != "" : Text {
+                        x: 6px; y: 6px;
+                        width: parent.width - 12px;
+                        text: n.error;
+                        color: #b00020;
+                        wrap: word-wrap;
+                        font-size: 11px * root.zoom;
+                    }
+                    TouchArea {
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.node-pressed(i);
+                                keys.focus();
+                            }
+                            if (e.kind == PointerEventKind.up) {
+                                root.node-drag-end(i);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.node-drag(i,
+                                    (self.mouse-x - self.pressed-x) / root.zoom,
+                                    (self.mouse-y - self.pressed-y) / root.zoom);
+                            }
+                        }
+                        double-clicked => {
+                            root.node-edit-request(i);
+                        }
+                    }
+                    TouchArea {
+                        x: parent.width - 12px;
+                        y: parent.height - 12px;
+                        width: 12px;
+                        height: 12px;
+                        mouse-cursor: ew-resize;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.up) {
+                                root.node-resize-end(i);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.node-resize(i, (self.mouse-x - self.pressed-x) / root.zoom);
+                            }
+                        }
+                        Rectangle {
+                            x: 4px; y: 4px; width: 6px; height: 6px;
+                            background: n.selected ? #3b82f6 : #bbbbbb;
+                        }
+                    }
+                }
+
+                editor := Rectangle {
+                    visible: root.edit-index >= 0;
+                    x: root.edit-index >= 0 ? root.pan-x + root.nodes[root.edit-index].x * root.zoom : 0;
+                    y: root.edit-index >= 0 ? root.pan-y + root.nodes[root.edit-index].y * root.zoom : 0;
+                    width: root.edit-index >= 0 ? max(root.nodes[root.edit-index].w * root.zoom, 320px) : 0;
+                    height: root.edit-index >= 0 ? max(root.nodes[root.edit-index].h * root.zoom, 160px) : 0;
+                    background: #fffbe6;
+                    border-color: #e0a800;
+                    border-width: 2px;
+                    border-radius: 3px;
+                    clip: true;
+
+                    edit-input := TextInput {
+                        x: 8px; y: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height - 16px;
+                        single-line: false;
+                        wrap: word-wrap;
+                        font-family: "monospace";
+                        font-size: 13px;
+                        color: #222;
+                        key-pressed(e) => {
+                            if (e.text == Key.Escape) {
+                                root.cancel-edit();
+                                return accept;
+                            }
+                            if (e.text == Key.Return && e.modifiers.control) {
+                                root.commit-edit(root.edit-index, self.text);
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 24px;
+            background: #e6e6e3;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                Text {
+                    text: root.status-left;
+                    vertical-alignment: center;
+                    color: #333;
+                }
+                Text {
+                    text: root.status-right;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    color: #333;
+                }
+            }
+        }
+    }
+}
