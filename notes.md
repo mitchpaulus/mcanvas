@@ -82,6 +82,20 @@ It mirrors the serde structs in `src/doc.rs`; change both together. Validate a f
   The app edits tables in a grid editor (double-click) with a right-click menu for
   rows, columns, alignment, and fills, and compiles to Typst for rendering.
 
+## Custom syntax highlighting
+
+Typst highlights fenced code with Sublime Text syntax definitions, and the renderer
+resolves file paths relative to the canvas file's directory. So for your own language:
+
+1. Put a `name.sublime-syntax` file next to the canvas (see
+   `examples/syntaxes/mini.sublime-syntax` for a minimal one).
+2. Add `#set raw(syntaxes: "name.sublime-syntax")` to the canvas `preamble`
+   (a list works for several: `syntaxes: ("a.sublime-syntax", "b.sublime-syntax")`).
+3. Fence code with the syntax's `name` or one of its `file_extensions`.
+
+Colors come from the raw theme; `#set raw(theme: "my.tmTheme")` swaps it. Both
+settings are per canvas because the preamble lives in the file.
+
 ## Risks to verify early
 
 1. **Typst crate weight and API churn.** Big dependency, frequent minor releases,

@@ -1,0 +1,29 @@
+%YAML 1.2
+---
+# Minimal example of a custom language definition for Typst's raw blocks.
+# Load it from the canvas preamble:  #set raw(syntaxes: "syntaxes/mini.sublime-syntax")
+# Then fence code with ```mini ... ```. Reference: https://www.sublimetext.com/docs/syntax.html
+name: Mini
+file_extensions: [mini]
+scope: source.mini
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.mini
+    - match: '\b(let|fn|if|else|return)\b'
+      scope: keyword.control.mini
+    - match: '\b[0-9]+(\.[0-9]+)?\b'
+      scope: constant.numeric.mini
+    - match: '"'
+      scope: punctuation.definition.string.begin.mini
+      push: string
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\()'
+      scope: entity.name.function.mini
+  string:
+    - meta_scope: string.quoted.double.mini
+    - match: '\\.'
+      scope: constant.character.escape.mini
+    - match: '"'
+      scope: punctuation.definition.string.end.mini
+      pop: true

@@ -7,7 +7,7 @@
     "y": 40,
     "zoom": 1.0
   },
-  "preamble": "#set text(font: \"Libertinus Serif\")",
+  "preamble": "#set text(font: \"Libertinus Serif\")\n#set raw(syntaxes: \"syntaxes/mini.sublime-syntax\")",
   "nodes": [
     {
       "id": "a1b2c3d4",
@@ -35,6 +35,15 @@
       "width": 360,
       "height": null,
       "source": "== Code\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```"
+    },
+    {
+      "id": "c4d5e6f7",
+      "type": "typst",
+      "x": 760,
+      "y": 0,
+      "width": 300,
+      "height": null,
+      "source": "== Custom syntax\n\nA `.sublime-syntax` file next to the canvas, loaded from the preamble.\n\n```mini\n# comment\nlet x = 42\nfn area(r) {\n  return 3.14 * r * r\n}\nprint(\"done\")\n```"
     },
     {
       "id": "3e4f5061",

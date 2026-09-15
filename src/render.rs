@@ -175,6 +175,20 @@ mod tests {
     }
 
     #[test]
+    fn custom_syntax_loads_relative_to_root() {
+        let r = Renderer::new();
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples"));
+        let pre = "#set raw(syntaxes: \"syntaxes/mini.sublime-syntax\")";
+        let code = "```mini\nlet x = 42 # note\n```";
+        let with = r.render(root, pre, code, 300.0).unwrap();
+        let without = r.render(root, "", code, 300.0).unwrap();
+        // Highlighting changes fill colors in the SVG; plain text has none.
+        assert_ne!(with.svg, without.svg);
+        let err = r.render(root, "#set raw(syntaxes: \"nope.sublime-syntax\")", code, 300.0).unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
     fn reports_errors_with_line() {
         let r = Renderer::new();
         let err = r
