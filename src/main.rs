@@ -2,6 +2,7 @@
 
 mod doc;
 mod render;
+mod table;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use slint::{ComponentHandle, Model, SharedString, VecModel};
 
 use doc::{Canvas, Node};
 use render::Renderer;
+use table::Table;
 
 slint::include_modules!();
 
@@ -31,7 +33,20 @@ struct App {
     message: String,
     renderer: Renderer,
     model: Rc<VecModel<NodeVm>>,
+    /// Working copy of the table being edited in the grid editor.
+    edit_table: Option<Table>,
+    /// Grid editor cell index -> (row, cell) in `edit_table.cells`.
+    cell_map: Vec<(usize, usize)>,
+    cell_model: Rc<VecModel<CellVm>>,
+    edge_model: Rc<VecModel<ColEdge>>,
+    /// Column width (canvas px) at the start of a divider drag.
+    col_resize_orig: Option<f64>,
 }
+
+/// Minimum on-screen width of the grid editor, in logical pixels.
+const TABLE_EDITOR_MIN_WIDTH: f64 = 480.0;
+/// Minimum width of a flexible column in the grid editor, in canvas units.
+const TABLE_EDITOR_MIN_COL: f64 = 48.0;
 
 impl App {
     fn root_dir(&self) -> PathBuf {
@@ -76,32 +91,39 @@ impl App {
                     }
                 }
             }
-            _ => {
-                match self.renderer.render(
-                    &self.root_dir(),
-                    &self.doc.preamble,
-                    &node.source,
-                    node.width,
-                ) {
-                    Ok(r) => {
-                        match slint::Image::load_from_svg_data(r.svg.as_bytes()) {
-                            Ok(img) => vm.img = img,
-                            Err(e) => vm.error = format!("svg error: {e:?}").into(),
-                        }
-                        if node.height.is_none() {
-                            vm.h = r.height.max(24.0) as f32;
-                        }
-                    }
-                    Err(e) => {
-                        vm.error = e.into();
-                        if node.height.is_none() {
-                            vm.h = 80.0;
-                        }
-                    }
+            "table" => match &node.table {
+                Some(t) => self.render_typst(&mut vm, node, &t.to_typst()),
+                None => {
+                    vm.error = "table node has no \"table\" data".into();
+                    vm.h = 60.0;
+                }
+            },
+            _ => self.render_typst(&mut vm, node, &node.source),
+        }
+        vm
+    }
+
+    fn render_typst(&self, vm: &mut NodeVm, node: &Node, source: &str) {
+        match self
+            .renderer
+            .render(&self.root_dir(), &self.doc.preamble, source, node.width)
+        {
+            Ok(r) => {
+                match slint::Image::load_from_svg_data(r.svg.as_bytes()) {
+                    Ok(img) => vm.img = img,
+                    Err(e) => vm.error = format!("svg error: {e:?}").into(),
+                }
+                if node.height.is_none() {
+                    vm.h = r.height.max(24.0) as f32;
+                }
+            }
+            Err(e) => {
+                vm.error = e.into();
+                if node.height.is_none() {
+                    vm.h = 80.0;
                 }
             }
         }
-        vm
     }
 
     fn refresh_node(&self, i: usize) {
@@ -265,7 +287,28 @@ impl App {
             height: None,
             source: String::new(),
             src: None,
+            table: None,
         };
+        self.push_node(node)
+    }
+
+    fn add_table(&mut self, x: f64, y: f64) -> usize {
+        self.snapshot();
+        let node = Node {
+            id: doc::new_id(),
+            kind: "table".into(),
+            x: self.doc.snap(x),
+            y: self.doc.snap(y),
+            width: DEFAULT_WIDTH,
+            height: None,
+            source: String::new(),
+            src: None,
+            table: Some(Table::starter()),
+        };
+        self.push_node(node)
+    }
+
+    fn push_node(&mut self, node: Node) -> usize {
         self.doc.nodes.push(node);
         let i = self.doc.nodes.len() - 1;
         self.selected = Some(i);
@@ -273,6 +316,136 @@ impl App {
         self.update_selection_flags();
         self.mark_dirty();
         i
+    }
+
+    /// Open the editor appropriate for the node's kind.
+    fn open_editor(&mut self, ui: &MainWindow, i: usize) {
+        self.selected = Some(i);
+        self.update_selection_flags();
+        self.drag_orig = None;
+        let node = &self.doc.nodes[i];
+        if node.kind == "table" {
+            self.edit_table = Some(node.table.clone().unwrap_or_else(Table::starter));
+            ui.invoke_begin_table_edit(i as i32);
+            self.refresh_table_editor(ui);
+        } else {
+            ui.invoke_begin_edit(i as i32, node.source.clone().into());
+        }
+    }
+
+    /// Rebuild the grid editor's cell and divider models from the working
+    /// copy. Rows are updated in place when the count is unchanged so that a
+    /// divider drag in progress keeps its TouchArea alive.
+    fn refresh_table_editor(&mut self, ui: &MainWindow) {
+        let Some(t) = &self.edit_table else { return };
+        let i = ui.get_table_edit_index();
+        let node_w = usize::try_from(i)
+            .ok()
+            .and_then(|i| self.doc.nodes.get(i))
+            .map_or(DEFAULT_WIDTH, |n| n.width);
+        let zoom = ui.get_zoom().max(0.01) as f64;
+        let total = node_w.max(TABLE_EDITOR_MIN_WIDTH / zoom);
+        let widths = t.column_widths(total, TABLE_EDITOR_MIN_COL);
+        let mut starts = vec![0.0; widths.len() + 1];
+        for (k, w) in widths.iter().enumerate() {
+            starts[k + 1] = starts[k] + w;
+        }
+        let (pos, nrows) = t.layout();
+        self.cell_map.clear();
+        let mut vms = Vec::new();
+        for (ri, row) in t.cells.iter().enumerate() {
+            for (ci, cell) in row.iter().enumerate() {
+                let (x, y) = pos[ri][ci];
+                let span = cell.colspan().min(widths.len() - x);
+                vms.push(CellVm {
+                    r: y as i32,
+                    x: starts[x] as f32,
+                    w: (starts[x + span] - starts[x]) as f32,
+                    text: cell.body.clone().into(),
+                    fill: cell.fill.as_deref().and_then(parse_hex).unwrap_or(slint::Color::from_argb_u8(0, 0, 0, 0)),
+                    header: ri < t.header,
+                });
+                self.cell_map.push((ri, ci));
+            }
+        }
+        let edges: Vec<ColEdge> = (0..widths.len())
+            .map(|c| ColEdge { col: c as i32, x: starts[c + 1] as f32 })
+            .collect();
+        ui.set_table_rows(nrows.max(1) as i32);
+        ui.set_table_width(starts[widths.len()] as f32);
+        replace_rows(&self.cell_model, vms);
+        replace_rows(&self.edge_model, edges);
+    }
+
+    fn table_col_resize_start(&mut self, ui: &MainWindow, col: usize) {
+        let Some(t) = &self.edit_table else { return };
+        let zoom = ui.get_zoom().max(0.01) as f64;
+        let node_w = usize::try_from(ui.get_table_edit_index())
+            .ok()
+            .and_then(|i| self.doc.nodes.get(i))
+            .map_or(DEFAULT_WIDTH, |n| n.width);
+        let widths = t.column_widths(node_w.max(TABLE_EDITOR_MIN_WIDTH / zoom), TABLE_EDITOR_MIN_COL);
+        self.col_resize_orig = widths.get(col).copied();
+    }
+
+    fn table_col_resize(&mut self, ui: &MainWindow, col: usize, dw: f64) {
+        let Some(orig) = self.col_resize_orig else { return };
+        if let Some(t) = &mut self.edit_table {
+            t.set_col_width_px(col, (orig + dw).max(24.0));
+        }
+        self.refresh_table_editor(ui);
+    }
+
+    /// Apply a context-menu operation to the working copy. `k` is the cell
+    /// the menu was opened on.
+    fn apply_table_op(&mut self, op: &str, k: usize) {
+        let Some(t) = &mut self.edit_table else { return };
+        let Some(&(ri, ci)) = self.cell_map.get(k) else { return };
+        let (pos, _) = t.layout();
+        let (x, _) = pos[ri][ci];
+        let span = t.cells[ri][ci].colspan();
+        match op {
+            "row-above" => t.insert_row(ri),
+            "row-below" => t.insert_row(ri + 1),
+            "row-delete" => t.delete_row(ri),
+            "col-left" => t.insert_col(x),
+            "col-right" => t.insert_col(x + span),
+            "col-delete" => t.delete_col(x),
+            "header-toggle" => t.header = if t.header > 0 { 0 } else { 1 },
+            _ => {
+                if let Some(v) = op.strip_prefix("fill:") {
+                    t.cells[ri][ci].fill = if v.is_empty() { None } else { Some(v.to_string()) };
+                } else if let Some(v) = op.strip_prefix("row-fill:") {
+                    for c in &mut t.cells[ri] {
+                        c.fill = if v.is_empty() { None } else { Some(v.to_string()) };
+                    }
+                } else if let Some(v) = op.strip_prefix("align:") {
+                    t.set_col_align(x, v);
+                } else if let Some(v) = op.strip_prefix("col-track:") {
+                    t.set_col_track(x, v);
+                }
+            }
+        }
+    }
+
+    fn commit_table_edit(&mut self, ui: &MainWindow) {
+        let i = ui.get_table_edit_index();
+        if let (Some(t), true) = (self.edit_table.take(), i >= 0) {
+            let i = i as usize;
+            if i < self.doc.nodes.len() && self.doc.nodes[i].table.as_ref() != Some(&t) {
+                self.snapshot();
+                // Widen the node if fixed column widths no longer fit.
+                let needed = t.min_width_px(TABLE_EDITOR_MIN_COL) + 16.0;
+                if needed > self.doc.nodes[i].width {
+                    let w = self.doc.snap(needed).max(needed);
+                    self.doc.nodes[i].width = w;
+                }
+                self.doc.nodes[i].table = Some(t);
+                self.refresh_node(i);
+                self.mark_dirty();
+            }
+        }
+        ui.invoke_end_table_edit();
     }
 
     fn delete_selected(&mut self) {
@@ -344,6 +517,36 @@ impl App {
     }
 }
 
+/// Update a model in place when the row count matches, otherwise replace it.
+/// In-place updates keep the repeated Slint elements (and any drag on them) alive.
+fn replace_rows<T: Clone + PartialEq + 'static>(model: &Rc<VecModel<T>>, rows: Vec<T>) {
+    if model.row_count() == rows.len() {
+        for (k, row) in rows.into_iter().enumerate() {
+            if model.row_data(k).as_ref() != Some(&row) {
+                model.set_row_data(k, row);
+            }
+        }
+    } else {
+        model.set_vec(rows);
+    }
+}
+
+/// Parse `#rgb`, `#rrggbb` or `#rrggbbaa` into a Slint color for the editor
+/// preview. Other Typst color expressions are not previewed.
+fn parse_hex(s: &str) -> Option<slint::Color> {
+    let h = s.trim().strip_prefix('#')?;
+    let v = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    let d = |i: usize| u8::from_str_radix(&h[i..i + 1], 16).ok().map(|x| x * 17);
+    let (r, g, b, a) = match h.len() {
+        3 => (d(0)?, d(1)?, d(2)?, 255),
+        4 => (d(0)?, d(1)?, d(2)?, d(3)?),
+        6 => (v(0)?, v(2)?, v(4)?, 255),
+        8 => (v(0)?, v(2)?, v(4)?, v(6)?),
+        _ => return None,
+    };
+    Some(slint::Color::from_argb_u8(a, r, g, b))
+}
+
 fn status(app: &App, ui: &MainWindow) {
     let name = app
         .path
@@ -383,6 +586,10 @@ fn main() {
     let ui = MainWindow::new().unwrap();
     let model = Rc::new(VecModel::<NodeVm>::default());
     ui.set_nodes(model.clone().into());
+    let cell_model = Rc::new(VecModel::<CellVm>::default());
+    ui.set_edit_cells(cell_model.clone().into());
+    let edge_model = Rc::new(VecModel::<ColEdge>::default());
+    ui.set_edit_col_edges(edge_model.clone().into());
     ui.set_pan_x(doc.view.x as f32);
     ui.set_pan_y(doc.view.y as f32);
     ui.set_zoom(doc.view.zoom as f32);
@@ -400,6 +607,11 @@ fn main() {
         message: String::new(),
         renderer: Renderer::new(),
         model,
+        edit_table: None,
+        cell_map: Vec::new(),
+        cell_model,
+        edge_model,
+        col_resize_orig: None,
     }));
     app.borrow().refresh_all();
     status(&app.borrow(), &ui);
@@ -505,11 +717,40 @@ fn main() {
     });
 
     hook!(on_node_edit_request, |a, u, i| {
-        let i = i as usize;
-        a.selected = Some(i);
-        a.update_selection_flags();
-        a.drag_orig = None;
-        u.invoke_begin_edit(i as i32, a.doc.nodes[i].source.clone().into());
+        a.open_editor(&u, i as usize);
+    });
+
+    hook!(on_table_cell_edited, |a, _u, k, text| {
+        let Some(&(ri, ci)) = a.cell_map.get(k as usize) else { return };
+        if let Some(t) = &mut a.edit_table {
+            t.cells[ri][ci].body = text.to_string();
+        }
+    });
+
+    hook!(on_table_op, |a, u, op, k| {
+        a.apply_table_op(op.as_str(), k as usize);
+        a.refresh_table_editor(&u);
+    });
+
+    hook!(on_table_col_resize_start, |a, u, col| {
+        a.table_col_resize_start(&u, col as usize);
+    });
+
+    hook!(on_table_col_resize, |a, u, col, dw| {
+        a.table_col_resize(&u, col as usize, dw as f64);
+    });
+
+    hook!(on_table_col_resize_end, |a, _u| {
+        a.col_resize_orig = None;
+    });
+
+    hook!(on_commit_table_edit, |a, u| {
+        a.commit_table_edit(&u);
+    });
+
+    hook!(on_cancel_table_edit, |a, u| {
+        a.edit_table = None;
+        u.invoke_end_table_edit();
     });
 
     hook!(on_background_clicked, |a, _u| {
@@ -564,7 +805,7 @@ fn main() {
             a.delete_selected();
         } else if is(Key::Return) {
             if let Some(i) = a.selected {
-                u.invoke_begin_edit(i as i32, a.doc.nodes[i].source.clone().into());
+                a.open_editor(&u, i);
             }
         } else if is(Key::LeftArrow) {
             a.navigate(-1.0, 0.0);
@@ -590,7 +831,16 @@ fn main() {
     });
 
     hook!(on_command, |a, u, name| {
-        let editing = u.get_edit_index() >= 0;
+        let editing = u.get_edit_index() >= 0 || u.get_table_edit_index() >= 0;
+        let end_edits = |a: &mut App, u: &MainWindow| {
+            if u.get_edit_index() >= 0 {
+                u.invoke_end_edit();
+            }
+            if u.get_table_edit_index() >= 0 {
+                a.edit_table = None;
+                u.invoke_end_table_edit();
+            }
+        };
         let zoom_step = |u: &MainWindow, f: f32| {
             let z = (u.get_zoom() * f).clamp(0.1, 8.0);
             let f = z / u.get_zoom();
@@ -598,17 +848,13 @@ fn main() {
         };
         match name.as_str() {
             "new" => {
-                if editing {
-                    u.invoke_end_edit();
-                }
+                end_edits(&mut a, &u);
                 if a.confirm_discard(&u) {
                     a.load_doc(Canvas::default(), None, &u);
                 }
             }
             "open" => {
-                if editing {
-                    u.invoke_end_edit();
-                }
+                end_edits(&mut a, &u);
                 if !a.confirm_discard(&u) {
                     return;
                 }
@@ -644,8 +890,14 @@ fn main() {
             }
             "edit-node" if !editing => {
                 if let Some(i) = a.selected {
-                    u.invoke_begin_edit(i as i32, a.doc.nodes[i].source.clone().into());
+                    a.open_editor(&u, i);
                 }
+            }
+            "add-table" if !editing => {
+                let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
+                let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();
+                let i = a.add_table(x as f64 - DEFAULT_WIDTH / 2.0, y as f64);
+                a.open_editor(&u, i);
             }
             "delete" if !editing => a.delete_selected(),
             "zoom-in" => zoom_step(&u, 1.25),
@@ -662,7 +914,8 @@ fn main() {
             }
             _ => {}
         }
-        if !editing {
+        // Return focus to the canvas unless the action opened an editor.
+        if u.get_edit_index() < 0 && u.get_table_edit_index() < 0 {
             u.invoke_focus_canvas();
         }
     });

@@ -9,6 +9,24 @@ export struct NodeVm {
     selected: bool,
 }
 
+// One cell of the table grid editor. r is the grid row (after span
+// placement); x and w are the horizontal position and width in canvas units,
+// already accounting for column widths and colspan. fill previews a hex fill.
+export struct CellVm {
+    r: int,
+    x: float,
+    w: float,
+    text: string,
+    fill: color,
+    header: bool,
+}
+
+// Draggable divider at the right edge of column `col`, in canvas units.
+export struct ColEdge {
+    col: int,
+    x: float,
+}
+
 // Flat icon button for the toolbar. Built from scratch rather than on the
 // std Button so the icon is exactly centered and the size is predictable.
 component ToolButton inherits Rectangle {
@@ -51,6 +69,12 @@ export component MainWindow inherits Window {
     in-out property <length> pan-y: 0;
     in-out property <float> zoom: 1.0;
     in-out property <int> edit-index: -1;
+    in-out property <[CellVm]> edit-cells;
+    in-out property <int> table-edit-index: -1;
+    in-out property <[ColEdge]> edit-col-edges;
+    in-out property <int> table-rows: 1;
+    // Total table width in canvas units.
+    in-out property <float> table-width: 320;
     in-out property <string> status-left;
     in-out property <string> status-right;
     out property <length> view-width: canvas.width;
@@ -66,6 +90,14 @@ export component MainWindow inherits Window {
     callback background-double-clicked(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
+    callback table-cell-edited(int, string);
+    // Grid editor context menu: operation name and the cell it was opened on.
+    callback table-op(string, int);
+    callback table-col-resize-start(int);
+    callback table-col-resize(int, float);
+    callback table-col-resize-end();
+    callback commit-table-edit();
+    callback cancel-table-edit();
     callback key(string, bool, bool) -> bool;
     // Menu and toolbar actions, identified by name ("save", "zoom-fit", ...).
     callback command(string);
@@ -77,6 +109,14 @@ export component MainWindow inherits Window {
     }
     public function end-edit() {
         root.edit-index = -1;
+        keys.focus();
+    }
+    public function begin-table-edit(i: int) {
+        root.table-edit-index = i;
+        table-keys.focus();
+    }
+    public function end-table-edit() {
+        root.table-edit-index = -1;
         keys.focus();
     }
     public function focus-canvas() {
@@ -105,6 +145,7 @@ export component MainWindow inherits Window {
             MenuItem { title: "Redo"; shortcut: @keys(Control + Y); activated => { root.command("redo"); } }
             MenuSeparator {}
             MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
+            MenuItem { title: "Add Table"; shortcut: @keys(Control + Shift + T); activated => { root.command("add-table"); } }
             MenuItem { title: "Edit Node"; activated => { root.command("edit-node"); } }
             MenuItem { title: "Delete Node"; activated => { root.command("delete"); } }
         }
@@ -139,6 +180,7 @@ export component MainWindow inherits Window {
                 ToolButton { icon: @image-url("icons/redo.svg"); tip: "Redo"; clicked => { root.command("redo"); } }
                 Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
                 ToolButton { icon: @image-url("icons/add-node.svg"); tip: "Add node"; clicked => { root.command("add-node"); } }
+                ToolButton { icon: @image-url("icons/add-table.svg"); tip: "Add table"; clicked => { root.command("add-table"); } }
                 ToolButton { icon: @image-url("icons/delete.svg"); tip: "Delete node"; clicked => { root.command("delete"); } }
                 Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
                 ToolButton { icon: @image-url("icons/zoom-in.svg"); tip: "Zoom in"; clicked => { root.command("zoom-in"); } }
@@ -317,6 +359,161 @@ export component MainWindow inherits Window {
                                 return accept;
                             }
                             reject
+                        }
+                    }
+                }
+
+                // Grid editor for table nodes. Cells are positioned from their
+                // grid coordinates; the width is split evenly between columns.
+                table-editor := Rectangle {
+                    property <length> cell-h: 30px;
+                    property <length> pad: 8px;
+                    // Canvas units to editor pixels.
+                    property <length> unit: 1px * root.zoom;
+                    visible: root.table-edit-index >= 0;
+                    x: root.table-edit-index >= 0 ? root.pan-x + root.nodes[root.table-edit-index].x * root.zoom : 0;
+                    y: root.table-edit-index >= 0 ? root.pan-y + root.nodes[root.table-edit-index].y * root.zoom : 0;
+                    width: root.table-width * unit + 2 * pad;
+                    height: root.table-rows * cell-h + 2 * pad + 20px;
+                    background: #fffbe6;
+                    border-color: #e0a800;
+                    border-width: 2px;
+                    border-radius: 3px;
+                    clip: true;
+
+                    table-keys := FocusScope {
+                        key-pressed(e) => {
+                            if (e.text == Key.Escape) {
+                                root.cancel-table-edit();
+                                return accept;
+                            }
+                            if (e.text == Key.Return && e.modifiers.control) {
+                                root.commit-table-edit();
+                                return accept;
+                            }
+                            reject
+                        }
+
+                        for cell[k] in root.edit-cells : Rectangle {
+                            x: table-editor.pad + cell.x * table-editor.unit;
+                            y: table-editor.pad + cell.r * table-editor.cell-h;
+                            width: cell.w * table-editor.unit;
+                            height: table-editor.cell-h;
+                            background: cell.fill;
+                            border-width: 1px;
+                            border-color: #d8cf9c;
+
+                            TextInput {
+                                x: 5px;
+                                width: parent.width - 10px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                text: cell.text;
+                                font-size: 13px;
+                                font-weight: cell.header ? 700 : 400;
+                                color: #222;
+                                edited => { root.table-cell-edited(k, self.text); }
+                                key-pressed(e) => {
+                                    if (e.text == Key.Escape) {
+                                        root.cancel-table-edit();
+                                        return accept;
+                                    }
+                                    if (e.text == Key.Return && e.modifiers.control) {
+                                        root.commit-table-edit();
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                            }
+                            ContextMenuArea {
+                                Menu {
+                                    MenuItem { title: "Insert row above"; activated => { root.table-op("row-above", k); } }
+                                    MenuItem { title: "Insert row below"; activated => { root.table-op("row-below", k); } }
+                                    MenuItem { title: "Delete row"; activated => { root.table-op("row-delete", k); } }
+                                    MenuSeparator {}
+                                    MenuItem { title: "Insert column left"; activated => { root.table-op("col-left", k); } }
+                                    MenuItem { title: "Insert column right"; activated => { root.table-op("col-right", k); } }
+                                    MenuItem { title: "Delete column"; activated => { root.table-op("col-delete", k); } }
+                                    MenuSeparator {}
+                                    Menu {
+                                        title: "Column align";
+                                        MenuItem { title: "Left"; activated => { root.table-op("align:left", k); } }
+                                        MenuItem { title: "Center"; activated => { root.table-op("align:center", k); } }
+                                        MenuItem { title: "Right"; activated => { root.table-op("align:right", k); } }
+                                        MenuItem { title: "Auto"; activated => { root.table-op("align:auto", k); } }
+                                    }
+                                    Menu {
+                                        title: "Column width";
+                                        MenuItem { title: "Auto (fit content)"; activated => { root.table-op("col-track:auto", k); } }
+                                        MenuItem { title: "Fill remaining (1fr)"; activated => { root.table-op("col-track:1fr", k); } }
+                                        MenuItem { title: "Fill double share (2fr)"; activated => { root.table-op("col-track:2fr", k); } }
+                                    }
+                                    Menu {
+                                        title: "Cell fill";
+                                        MenuItem { title: "None"; activated => { root.table-op("fill:", k); } }
+                                        MenuItem { title: "Gray"; activated => { root.table-op("fill:#e5e7eb", k); } }
+                                        MenuItem { title: "Yellow"; activated => { root.table-op("fill:#fef3c7", k); } }
+                                        MenuItem { title: "Green"; activated => { root.table-op("fill:#d1fae5", k); } }
+                                        MenuItem { title: "Blue"; activated => { root.table-op("fill:#dbeafe", k); } }
+                                        MenuItem { title: "Red"; activated => { root.table-op("fill:#fee2e2", k); } }
+                                        MenuItem { title: "Purple"; activated => { root.table-op("fill:#ede9fe", k); } }
+                                    }
+                                    Menu {
+                                        title: "Row fill";
+                                        MenuItem { title: "None"; activated => { root.table-op("row-fill:", k); } }
+                                        MenuItem { title: "Gray"; activated => { root.table-op("row-fill:#e5e7eb", k); } }
+                                        MenuItem { title: "Yellow"; activated => { root.table-op("row-fill:#fef3c7", k); } }
+                                        MenuItem { title: "Green"; activated => { root.table-op("row-fill:#d1fae5", k); } }
+                                        MenuItem { title: "Blue"; activated => { root.table-op("row-fill:#dbeafe", k); } }
+                                        MenuItem { title: "Red"; activated => { root.table-op("row-fill:#fee2e2", k); } }
+                                        MenuItem { title: "Purple"; activated => { root.table-op("row-fill:#ede9fe", k); } }
+                                    }
+                                    MenuSeparator {}
+                                    MenuItem { title: "Toggle header row"; activated => { root.table-op("header-toggle", k); } }
+                                }
+                            }
+                        }
+
+                        // Column dividers. Dragging one fixes that column's
+                        // width in points. Positions are measured against the
+                        // static FocusScope so the handle moving under the
+                        // pointer does not feed back into the delta.
+                        for edge in root.edit-col-edges : TouchArea {
+                            property <length> start-x;
+                            x: table-editor.pad + edge.x * table-editor.unit - 4px;
+                            y: table-editor.pad;
+                            width: 8px;
+                            height: root.table-rows * table-editor.cell-h;
+                            mouse-cursor: col-resize;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    self.start-x = self.x + self.mouse-x;
+                                    root.table-col-resize-start(edge.col);
+                                }
+                                if (e.kind == PointerEventKind.up) {
+                                    root.table-col-resize-end();
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.table-col-resize(edge.col, (self.x + self.mouse-x - self.start-x) / table-editor.unit);
+                                }
+                            }
+                            Rectangle {
+                                x: 3px;
+                                width: 2px;
+                                height: parent.height;
+                                background: parent.has-hover || parent.pressed ? #e0a800 : transparent;
+                            }
+                        }
+
+                        Text {
+                            x: table-editor.pad;
+                            y: table-editor.height - 20px;
+                            text: "Ctrl+Enter save   Esc cancel   right-click a cell for rows, columns, width, fill   drag dividers to resize";
+                            font-size: 11px;
+                            color: #8a7a2a;
                         }
                     }
                 }

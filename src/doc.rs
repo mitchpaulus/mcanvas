@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::table::Table;
+
 pub const GRID: f64 = 8.0;
 
 // The on-disk JSON format is described by schema/canvas.schema.json.
@@ -34,6 +36,9 @@ pub struct Node {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src: Option<String>,
+    /// Table model for "table" nodes. See table.rs for the Typst mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<Table>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -105,9 +110,12 @@ mod tests {
         assert_eq!(canvas.version, 0);
         assert!(!canvas.nodes.is_empty());
         for n in &canvas.nodes {
-            assert!(matches!(n.kind.as_str(), "typst" | "image"), "unknown node type {}", n.kind);
+            assert!(matches!(n.kind.as_str(), "typst" | "image" | "table"), "unknown node type {}", n.kind);
             if n.kind == "image" {
                 assert!(n.src.is_some(), "image node {} needs src", n.id);
+            }
+            if n.kind == "table" {
+                assert!(n.table.is_some(), "table node {} needs table", n.id);
             }
         }
         // Round trip must not lose anything.

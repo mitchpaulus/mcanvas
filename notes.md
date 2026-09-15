@@ -73,6 +73,14 @@ It mirrors the serde structs in `src/doc.rs`; change both together. Validate a f
 - `id` is a short random string like JSON Canvas uses.
 - `edges` and `groups` can be added later as top-level arrays without breaking v0 files.
 - Code blocks and math are just Typst source, so `typst` is the only prose node type.
+- `table` nodes carry a `table` object that mirrors Typst's `table()` call (see
+  `src/table.rs`): `columns`/`rows` track sizes, `cells` as a 2D array in emission
+  order, `header`/`footer` row counts, `align`/`fill`/`stroke`/`inset`/`gutter`, and
+  `hlines`/`vlines`. A cell is a markup string or `{ "body", "colspan", "rowspan",
+  "fill", "align", "stroke", "inset" }` which becomes `table.cell(..)[body]`. Style
+  values are Typst expressions copied verbatim; a bare hex color is wrapped in `rgb()`.
+  The app edits tables in a grid editor (double-click) with a right-click menu for
+  rows, columns, alignment, and fills, and compiles to Typst for rendering.
 
 ## Risks to verify early
 

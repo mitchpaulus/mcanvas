@@ -2,7 +2,11 @@
   "$schema": "../schema/canvas.schema.json",
   "version": 0,
   "grid": 8,
-  "view": { "x": 40, "y": 40, "zoom": 1.0 },
+  "view": {
+    "x": 40,
+    "y": 40,
+    "zoom": 1.0
+  },
   "preamble": "#set text(font: \"Libertinus Serif\")",
   "nodes": [
     {
@@ -40,6 +44,70 @@
       "width": 320,
       "height": null,
       "source": "== Shortcuts\n\n/ Ctrl+N: new block\n/ Enter: edit selected\n/ Ctrl+Enter: commit edit\n/ Esc: cancel edit\n/ Arrows: move selection spatially\n/ Ctrl+Z, Ctrl+Shift+Z: undo, redo\n/ Ctrl+S: save\n/ Ctrl+wheel: zoom\n/ Del: delete block"
+    },
+    {
+      "id": "7b8c9d0e",
+      "type": "table",
+      "x": 0,
+      "y": 480,
+      "width": 720,
+      "height": null,
+      "table": {
+        "columns": [
+          "auto",
+          "1fr",
+          "auto",
+          "auto"
+        ],
+        "header": 1,
+        "stroke": "0.5pt + luma(60%)",
+        "align": [
+          "left",
+          "left",
+          "right",
+          "right"
+        ],
+        "cells": [
+          [
+            "Item",
+            "Description",
+            "Qty",
+            "Cost"
+          ],
+          [
+            "Widget",
+            "Standard *bolted* flange",
+            "12",
+            "\\$48.00"
+          ],
+          [
+            "Gasket",
+            {
+              "body": "Nitrile, 3 mm",
+              "fill": "#fef3c7"
+            },
+            "24",
+            "\\$6.00"
+          ],
+          [
+            {
+              "body": "Total",
+              "colspan": 3,
+              "align": "right"
+            },
+            {
+              "body": "\\$54.00",
+              "fill": "#dbeafe"
+            }
+          ]
+        ],
+        "hlines": [
+          {
+            "at": 3,
+            "stroke": "1.5pt"
+          }
+        ]
+      }
     }
   ]
 }
