@@ -52,7 +52,7 @@ Companion to `design.md`. Captures decisions made so far and a proposed plan.
 
 The authoritative description is `schema/canvas.schema.json` (JSON Schema 2020-12).
 It mirrors the serde structs in `src/doc.rs`; change both together. Validate a file with
-`check-jsonschema --schemafile schema/canvas.schema.json file.canvas.json` or any
+`check-jsonschema --schemafile schema/canvas.schema.json file.mc` or any
 2020-12 validator.
 
 ```json
@@ -139,7 +139,7 @@ settings are per canvas because the preamble lives in the file.
 
 ## Status (2026-09-15): MVP built
 
-Run with `cargo run -- examples/demo.canvas.json` (or any path; a missing file
+Run with `cargo run -- examples/demo.mc` (or any path; a missing file
 starts an empty canvas that saves to that path).
 
 Working:

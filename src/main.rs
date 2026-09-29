@@ -177,7 +177,7 @@ impl App {
         let path = self
             .path
             .clone()
-            .unwrap_or_else(|| PathBuf::from("untitled.canvas.json"));
+            .unwrap_or_else(|| PathBuf::from("untitled.mc"));
         self.doc.save(&path)?;
         self.path = Some(path);
         self.dirty = false;
@@ -211,12 +211,12 @@ impl App {
 
     fn save_as_dialog(&self) -> Option<PathBuf> {
         let mut d = rfd::FileDialog::new()
-            .add_filter("canvas", &["json"])
+            .add_filter("mcanvas", &["mc"])
             .set_directory(self.root_dir());
         if let Some(name) = self.path.as_ref().and_then(|p| p.file_name()) {
             d = d.set_file_name(name.to_string_lossy());
         } else {
-            d = d.set_file_name("untitled.canvas.json");
+            d = d.set_file_name("untitled.mc");
         }
         d.save_file()
     }
@@ -989,7 +989,7 @@ fn main() {
                     return;
                 }
                 let picked = rfd::FileDialog::new()
-                    .add_filter("canvas", &["json"])
+                    .add_filter("mcanvas", &["mc"])
                     .set_directory(a.root_dir())
                     .pick_file();
                 if let Some(p) = picked {

@@ -724,7 +724,7 @@ mod tests {
     fn demo_table_compiles_under_typst() {
         let canvas = crate::doc::Canvas::load(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/examples/demo.canvas.json"
+            "/examples/demo.mc"
         )))
         .unwrap();
         let node = canvas.nodes.iter().find(|n| n.kind == "table").expect("demo has a table node");

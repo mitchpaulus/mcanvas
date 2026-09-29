@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn demo_file_matches_document_model() {
-        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/demo.canvas.json"));
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/demo.mc"));
         let canvas = Canvas::load(path).expect("demo file should parse");
         assert_eq!(canvas.version, 0);
         assert!(!canvas.nodes.is_empty());
