@@ -1,0 +1,6 @@
+# Statically link the MSVC C runtime so the Windows exe has no vcruntime140.dll dependency.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[alias]
+xtask = "run --quiet --package xtask --"
