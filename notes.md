@@ -168,8 +168,14 @@ Working:
 - `#![windows_subsystem = "windows"]` so no console window opens on Windows
   (stderr output is therefore invisible there).
 - Image nodes (`type: "image"`, `src` relative to the canvas file) load via Slint.
+- Paste (Ctrl+V on the canvas, or Edit > Paste): a clipboard image (a Windows
+  snip, macOS screenshot, etc.) becomes an image node with the pixels embedded as
+  base64 PNG in `data`, sized to its on-screen size (physical px / scale factor,
+  capped at 960). Clipboard text becomes a Typst node. Ctrl+V is handled in the
+  canvas key handler, not declared on the menu, because Slint runs menu
+  shortcuts before the focused widget and would swallow text paste in editors.
+  "Copy as Typst" does nothing useful for embedded images (there is no path).
 
 Not yet:
 - Manual height (`height` is respected if set in JSON, but there is no UI for it).
-- Inline base64 images.
 - Off-thread rendering; compiles run on the UI thread and are fast enough so far.

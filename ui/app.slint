@@ -146,6 +146,10 @@ export component MainWindow inherits Window {
             MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.command("undo"); } }
             MenuItem { title: "Redo"; shortcut: @keys(Control + Y); activated => { root.command("redo"); } }
             MenuSeparator {}
+            // Ctrl+V is handled by the canvas key handler, not declared here,
+            // so it keeps working as text paste inside the editors.
+            MenuItem { title: "Paste (Ctrl+V)"; activated => { root.command("paste"); } }
+            MenuSeparator {}
             MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
             MenuItem { title: "Add Table"; shortcut: @keys(Control + Shift + T); activated => { root.command("add-table"); } }
             MenuItem { title: "Edit Node"; activated => { root.command("edit-node"); } }

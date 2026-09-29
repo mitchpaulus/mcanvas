@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::table::Table;
 
@@ -36,6 +37,10 @@ pub struct Node {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src: Option<String>,
+    /// Embedded base64 PNG for "image" nodes, used instead of `src` (pasted
+    /// images). Arc so that undo snapshots do not copy the pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Arc<str>>,
     /// Table model for "table" nodes. See table.rs for the Typst mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<Table>,
@@ -112,7 +117,7 @@ mod tests {
         for n in &canvas.nodes {
             assert!(matches!(n.kind.as_str(), "typst" | "image" | "table"), "unknown node type {}", n.kind);
             if n.kind == "image" {
-                assert!(n.src.is_some(), "image node {} needs src", n.id);
+                assert!(n.src.is_some() || n.data.is_some(), "image node {} needs src or data", n.id);
             }
             if n.kind == "table" {
                 assert!(n.table.is_some(), "table node {} needs table", n.id);
@@ -136,5 +141,11 @@ mod tests {
         assert_eq!(n.height, None);
         assert_eq!(n.source, "");
         assert!(serde_json::from_str::<Node>(r#"{"id":"a","type":"typst"}"#).is_err());
+        let img: Node = serde_json::from_str(
+            r#"{"id":"b","type":"image","x":0,"y":0,"width":10,"data":"iVBORw0KGgo="}"#,
+        )
+        .unwrap();
+        assert_eq!(img.data.as_deref(), Some("iVBORw0KGgo="));
+        assert!(serde_json::to_string(&img).unwrap().contains(r#""data":"iVBORw0KGgo=""#));
     }
 }

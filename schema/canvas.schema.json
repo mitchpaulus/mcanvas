@@ -78,7 +78,7 @@
           "minLength": 1
         },
         "type": {
-          "description": "Node kind. \"typst\" renders `source`; \"image\" displays the file at `src`; \"table\" renders `table` as a Typst table.",
+          "description": "Node kind. \"typst\" renders `source`; \"image\" displays the embedded `data` or the file at `src`; \"table\" renders `table` as a Typst table.",
           "type": "string",
           "enum": [
             "typst",
@@ -115,6 +115,12 @@
           "description": "Image path for an \"image\" node, absolute or relative to the canvas file's directory.",
           "type": "string"
         },
+        "data": {
+          "description": "Embedded image for an \"image\" node, as base64-encoded PNG. Pasted images are stored this way. Takes precedence over `src`.",
+          "type": "string",
+          "contentEncoding": "base64",
+          "contentMediaType": "image/png"
+        },
         "table": {
           "description": "Table model for a \"table\" node.",
           "$ref": "#/$defs/table"
@@ -131,8 +137,17 @@
             }
           },
           "then": {
-            "required": [
-              "src"
+            "anyOf": [
+              {
+                "required": [
+                  "src"
+                ]
+              },
+              {
+                "required": [
+                  "data"
+                ]
+              }
             ]
           }
         },

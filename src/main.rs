@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod doc;
+mod picture;
 mod render;
 mod table;
 
@@ -19,6 +20,8 @@ slint::include_modules!();
 
 const UNSAVED_WARN_AFTER: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_WIDTH: f64 = 320.0;
+/// Pasted images wider than this (canvas units) are scaled down to fit.
+const MAX_PASTE_WIDTH: f64 = 960.0;
 
 struct App {
     doc: Canvas,
@@ -71,13 +74,21 @@ impl App {
         };
         match node.kind.as_str() {
             "image" => {
-                let src = node.src.clone().unwrap_or_default();
-                let path = if Path::new(&src).is_absolute() {
-                    PathBuf::from(&src)
-                } else {
-                    self.root_dir().join(&src)
+                let loaded = match &node.data {
+                    Some(data) => picture::slint_image_from_base64(data)
+                        .map_err(|e| format!("cannot decode embedded image: {e}")),
+                    None => {
+                        let src = node.src.clone().unwrap_or_default();
+                        let path = if Path::new(&src).is_absolute() {
+                            PathBuf::from(&src)
+                        } else {
+                            self.root_dir().join(&src)
+                        };
+                        slint::Image::load_from_path(&path)
+                            .map_err(|_| format!("cannot load image: {}", path.display()))
+                    }
                 };
-                match slint::Image::load_from_path(&path) {
+                match loaded {
                     Ok(img) => {
                         let size = img.size();
                         if node.height.is_none() && size.width > 0 {
@@ -85,8 +96,8 @@ impl App {
                         }
                         vm.img = img;
                     }
-                    Err(_) => {
-                        vm.error = format!("cannot load image: {}", path.display()).into();
+                    Err(e) => {
+                        vm.error = e.into();
                         vm.h = 60.0;
                     }
                 }
@@ -287,6 +298,7 @@ impl App {
             height: None,
             source: String::new(),
             src: None,
+            data: None,
             table: None,
         };
         self.push_node(node)
@@ -303,6 +315,7 @@ impl App {
             height: None,
             source: String::new(),
             src: None,
+            data: None,
             table: Some(Table::starter()),
         };
         self.push_node(node)
@@ -316,6 +329,71 @@ impl App {
         self.update_selection_flags();
         self.mark_dirty();
         i
+    }
+
+    /// Paste the clipboard as a new node centered in the view: an image
+    /// (e.g. a screen snip) becomes an embedded image node, text becomes a
+    /// Typst node.
+    fn paste(&mut self, ui: &MainWindow) {
+        let mut clip = match arboard::Clipboard::new() {
+            Ok(c) => c,
+            Err(e) => {
+                self.message = format!("clipboard error: {e}");
+                return;
+            }
+        };
+        let cx = ((ui.get_view_width() / 2.0 - ui.get_pan_x()) / ui.get_zoom()) as f64;
+        let cy = ((ui.get_view_height() / 2.0 - ui.get_pan_y()) / ui.get_zoom()) as f64;
+        if let Ok(img) = clip.get_image() {
+            let (w, h) = (img.width, img.height);
+            let data = match picture::rgba_to_png_base64(w as u32, h as u32, img.bytes.into_owned()) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.message = format!("cannot encode pasted image: {e}");
+                    return;
+                }
+            };
+            // Show the snip at the size it had on screen: clipboard pixels are
+            // physical, canvas units are logical.
+            let scale = ui.window().scale_factor().max(0.1) as f64;
+            let width = self.doc.snap((w as f64 / scale).min(MAX_PASTE_WIDTH)).max(self.doc.grid.max(8.0));
+            let height = width * h as f64 / w.max(1) as f64;
+            self.snapshot();
+            self.push_node(Node {
+                id: doc::new_id(),
+                kind: "image".into(),
+                x: self.doc.snap(cx - width / 2.0),
+                y: self.doc.snap(cy - height / 2.0),
+                width,
+                height: None,
+                source: String::new(),
+                src: None,
+                data: Some(data.into()),
+                table: None,
+            });
+            self.message = format!("pasted {w}x{h} image");
+        } else if let Ok(text) = clip.get_text() {
+            if text.trim().is_empty() {
+                self.message = "clipboard is empty".into();
+                return;
+            }
+            self.snapshot();
+            self.push_node(Node {
+                id: doc::new_id(),
+                kind: "typst".into(),
+                x: self.doc.snap(cx - DEFAULT_WIDTH / 2.0),
+                y: self.doc.snap(cy),
+                width: DEFAULT_WIDTH,
+                height: None,
+                source: text,
+                src: None,
+                data: None,
+                table: None,
+            });
+            self.message = "pasted text".into();
+        } else {
+            self.message = "nothing to paste".into();
+        }
     }
 
     /// The node as standalone Typst markup, for the clipboard.
@@ -750,6 +828,9 @@ fn main() {
         }
         match op.as_str() {
             "edit" => a.open_editor(&u, i),
+            "copy-typst" if a.doc.nodes[i].data.is_some() => {
+                a.message = "embedded image has no file path to reference in Typst".into();
+            }
             "copy-typst" => {
                 let text = a.node_as_typst(i);
                 a.copy_to_clipboard(text);
@@ -839,6 +920,13 @@ fn main() {
             // Most Ctrl shortcuts are declared on the menu bar and never reach here.
             if shift && (k == "z" || k == "Z") {
                 a.redo();
+                return true;
+            }
+            // Ctrl+V is handled here rather than as a menu shortcut: menu
+            // shortcuts fire before the focused widget, which would break
+            // pasting text in the node and table editors.
+            if !shift && (k == "v" || k == "V") {
+                a.paste(&u);
                 return true;
             }
             return false;
@@ -942,6 +1030,7 @@ fn main() {
                 a.open_editor(&u, i);
             }
             "delete" if !editing => a.delete_selected(),
+            "paste" if !editing => a.paste(&u),
             "zoom-in" => zoom_step(&u, 1.25),
             "zoom-out" => zoom_step(&u, 0.8),
             "zoom-100" => {
