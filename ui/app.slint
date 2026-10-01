@@ -27,6 +27,12 @@ export struct ColEdge {
     x: float,
 }
 
+// One tab in the page strip.
+export struct PageTab {
+    name: string,
+    active: bool,
+}
+
 // Flat icon button for the toolbar. Built from scratch rather than on the
 // std Button so the icon is exactly centered and the size is predictable.
 component ToolButton inherits Rectangle {
@@ -75,6 +81,9 @@ export component MainWindow inherits Window {
     in-out property <int> table-rows: 1;
     // Total table width in canvas units.
     in-out property <float> table-width: 320;
+    in-out property <[PageTab]> pages;
+    // Index of the tab being renamed inline, or -1.
+    in-out property <int> rename-page: -1;
     in-out property <string> status-left;
     in-out property <string> status-right;
     out property <length> view-width: canvas.width;
@@ -100,6 +109,11 @@ export component MainWindow inherits Window {
     callback table-col-resize-end();
     callback commit-table-edit();
     callback cancel-table-edit();
+    // Page actions: "select", "next", "prev", "add", "duplicate", "rename",
+    // "move-left", "move-right", "delete". The int is a tab index, or -1 for
+    // the active page. Call through page-action() so open edits are kept.
+    callback page-op(string, int);
+    callback page-renamed(int, string);
     callback key(string, bool, bool) -> bool;
     // Menu and toolbar actions, identified by name ("save", "zoom-fit", ...).
     callback command(string);
@@ -120,6 +134,17 @@ export component MainWindow inherits Window {
     public function end-table-edit() {
         root.table-edit-index = -1;
         keys.focus();
+    }
+    // Commit any open editor, then run a page action, so switching pages
+    // never drops text typed into a node.
+    public function page-action(op: string, i: int) {
+        if (root.edit-index >= 0) {
+            root.commit-edit(root.edit-index, edit-input.text);
+        }
+        if (root.table-edit-index >= 0) {
+            root.commit-table-edit();
+        }
+        root.page-op(op, i);
     }
     public function focus-canvas() {
         keys.focus();
@@ -164,6 +189,19 @@ export component MainWindow inherits Window {
             MenuSeparator {}
             MenuItem { title: "Reset View"; activated => { root.command("reset-view"); } }
         }
+        Menu {
+            title: "Page";
+            MenuItem { title: "New Page"; shortcut: @keys(Control + T); activated => { root.page-action("add", -1); } }
+            MenuItem { title: "Duplicate Page"; activated => { root.page-action("duplicate", -1); } }
+            MenuItem { title: "Rename Page"; shortcut: @keys(F2); activated => { root.page-action("rename", -1); } }
+            MenuItem { title: "Delete Page"; activated => { root.page-action("delete", -1); } }
+            MenuSeparator {}
+            // Ctrl+PgUp/PgDn are handled by the canvas key handler.
+            MenuItem { title: "Next Page (Ctrl+PgDn)"; activated => { root.page-action("next", -1); } }
+            MenuItem { title: "Previous Page (Ctrl+PgUp)"; activated => { root.page-action("prev", -1); } }
+            MenuItem { title: "Move Page Left"; activated => { root.page-action("move-left", -1); } }
+            MenuItem { title: "Move Page Right"; activated => { root.page-action("move-right", -1); } }
+        }
     }
 
     VerticalLayout {
@@ -202,6 +240,16 @@ export component MainWindow inherits Window {
 
             keys := FocusScope {
                 key-pressed(e) => {
+                    // Also reached from inside the node editor, whose unhandled
+                    // keys bubble up here; page-action commits it first.
+                    if (e.modifiers.control && e.text == Key.PageDown) {
+                        root.page-action("next", -1);
+                        return accept;
+                    }
+                    if (e.modifiers.control && e.text == Key.PageUp) {
+                        root.page-action("prev", -1);
+                        return accept;
+                    }
                     if (root.key(e.text, e.modifiers.control, e.modifiers.shift)) {
                         return accept;
                     }
@@ -530,6 +578,92 @@ export component MainWindow inherits Window {
                             font-size: 11px;
                             color: #8a7a2a;
                         }
+                    }
+                }
+            }
+        }
+        // Page tabs, attached to the bottom of the canvas like sheet tabs.
+        Rectangle {
+            height: 28px;
+            background: #dcdcd8;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-bottom: 3px;
+                spacing: 2px;
+                alignment: start;
+                for p[i] in root.pages : Rectangle {
+                    background: p.active ? #f4f4f2 : tab-ta.has-hover ? #e8e8e5 : #d0d0cc;
+                    border-radius: 3px;
+                    tab-ta := TouchArea {
+                        clicked => { root.page-action("select", i); }
+                        double-clicked => { root.page-action("rename", i); }
+                    }
+                    ContextMenuArea {
+                        Menu {
+                            MenuItem { title: "Rename"; activated => { root.page-action("rename", i); } }
+                            MenuItem { title: "Duplicate"; activated => { root.page-action("duplicate", i); } }
+                            MenuSeparator {}
+                            MenuItem { title: "Move left"; activated => { root.page-action("move-left", i); } }
+                            MenuItem { title: "Move right"; activated => { root.page-action("move-right", i); } }
+                            MenuSeparator {}
+                            MenuItem { title: "Delete"; activated => { root.page-action("delete", i); } }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        if root.rename-page != i : Text {
+                            text: p.name;
+                            vertical-alignment: center;
+                            font-weight: p.active ? 600 : 400;
+                            color: #333;
+                        }
+                        if root.rename-page == i : TextInput {
+                            text: p.name;
+                            min-width: 80px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            color: #222;
+                            init => {
+                                self.focus();
+                                self.select-all();
+                            }
+                            accepted => { root.page-renamed(i, self.text); }
+                            // Clicking elsewhere keeps the new name. Escape
+                            // clears rename-page first, so this skips it.
+                            changed has-focus => {
+                                if (!self.has-focus && root.rename-page == i) {
+                                    root.page-renamed(i, self.text);
+                                }
+                            }
+                            key-pressed(e) => {
+                                if (e.text == Key.Escape) {
+                                    root.rename-page = -1;
+                                    root.focus-canvas();
+                                    return accept;
+                                }
+                                reject
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 24px;
+                    border-radius: 3px;
+                    background: add-ta.has-hover ? #e8e8e5 : transparent;
+                    add-ta := TouchArea {
+                        clicked => { root.page-action("add", -1); }
+                    }
+                    Text {
+                        text: "+";
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: #444;
+                    }
+                    Tooltip {
+                        text: @markdown("New page (Ctrl+T)");
                     }
                 }
             }

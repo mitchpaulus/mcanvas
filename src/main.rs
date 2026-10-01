@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 
-use doc::{Canvas, Node};
+use doc::{Canvas, Node, Page};
 use render::Renderer;
 use table::Table;
 
@@ -28,14 +28,17 @@ struct App {
     path: Option<PathBuf>,
     dirty: bool,
     dirty_since: Option<Instant>,
-    undo: Vec<Vec<Node>>,
-    redo: Vec<Vec<Node>>,
+    /// Index into `doc.pages` of the page on screen.
+    active: usize,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     selected: Option<usize>,
     drag_orig: Option<(f64, f64)>,
     resize_orig: Option<f64>,
     message: String,
     renderer: Renderer,
     model: Rc<VecModel<NodeVm>>,
+    tab_model: Rc<VecModel<PageTab>>,
     /// Working copy of the table being edited in the grid editor.
     edit_table: Option<Table>,
     /// Grid editor cell index -> (row, cell) in `edit_table.cells`.
@@ -44,6 +47,13 @@ struct App {
     edge_model: Rc<VecModel<ColEdge>>,
     /// Column width (canvas px) at the start of a divider drag.
     col_resize_orig: Option<f64>,
+}
+
+/// Undo state: every page, plus the page the change was made on so that undo
+/// and redo bring it into view.
+struct Snapshot {
+    pages: Vec<Page>,
+    active: usize,
 }
 
 /// Minimum on-screen width of the grid editor, in logical pixels.
@@ -60,8 +70,16 @@ impl App {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
+    fn nodes(&self) -> &Vec<Node> {
+        &self.doc.pages[self.active].nodes
+    }
+
+    fn nodes_mut(&mut self) -> &mut Vec<Node> {
+        &mut self.doc.pages[self.active].nodes
+    }
+
     fn build_vm(&self, i: usize) -> NodeVm {
-        let node = &self.doc.nodes[i];
+        let node = &self.nodes()[i];
         let mut vm = NodeVm {
             id: node.id.clone().into(),
             x: node.x as f32,
@@ -142,8 +160,19 @@ impl App {
     }
 
     fn refresh_all(&self) {
-        let vms: Vec<NodeVm> = (0..self.doc.nodes.len()).map(|i| self.build_vm(i)).collect();
+        let vms: Vec<NodeVm> = (0..self.nodes().len()).map(|i| self.build_vm(i)).collect();
         self.model.set_vec(vms);
+    }
+
+    fn refresh_tabs(&self) {
+        let tabs: Vec<PageTab> = self
+            .doc
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PageTab { name: p.name.clone().into(), active: i == self.active })
+            .collect();
+        replace_rows(&self.tab_model, tabs);
     }
 
     fn update_selection_flags(&self) {
@@ -159,7 +188,7 @@ impl App {
     }
 
     fn snapshot(&mut self) {
-        self.undo.push(self.doc.nodes.clone());
+        self.undo.push(Snapshot { pages: self.doc.pages.clone(), active: self.active });
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -178,6 +207,7 @@ impl App {
             .path
             .clone()
             .unwrap_or_else(|| PathBuf::from("untitled.mc"));
+        self.doc.page = self.doc.pages[self.active].id.clone();
         self.doc.save(&path)?;
         self.path = Some(path);
         self.dirty = false;
@@ -187,10 +217,9 @@ impl App {
 
     /// Replace the document and reset all editing state.
     fn load_doc(&mut self, doc: Canvas, path: Option<PathBuf>, ui: &MainWindow) {
-        ui.set_pan_x(doc.view.x as f32);
-        ui.set_pan_y(doc.view.y as f32);
-        ui.set_zoom(doc.view.zoom as f32);
+        self.active = doc.start_page();
         self.doc = doc;
+        self.apply_view(ui);
         self.path = path;
         self.dirty = false;
         self.dirty_since = None;
@@ -201,12 +230,126 @@ impl App {
         self.resize_orig = None;
         self.message.clear();
         self.refresh_all();
+        self.refresh_tabs();
     }
 
+    /// Remember the viewport in the active page.
     fn store_view(&mut self, ui: &MainWindow) {
-        self.doc.view.x = ui.get_pan_x() as f64;
-        self.doc.view.y = ui.get_pan_y() as f64;
-        self.doc.view.zoom = ui.get_zoom() as f64;
+        let view = &mut self.doc.pages[self.active].view;
+        view.x = ui.get_pan_x() as f64;
+        view.y = ui.get_pan_y() as f64;
+        view.zoom = ui.get_zoom() as f64;
+    }
+
+    /// Show the active page's saved viewport.
+    fn apply_view(&self, ui: &MainWindow) {
+        let view = &self.doc.pages[self.active].view;
+        ui.set_pan_x(view.x as f32);
+        ui.set_pan_y(view.y as f32);
+        ui.set_zoom(view.zoom as f32);
+    }
+
+    /// Put page `i` on screen, keeping each page's own viewport.
+    fn show_page(&mut self, ui: &MainWindow, i: usize) {
+        if i >= self.doc.pages.len() {
+            return;
+        }
+        if i != self.active {
+            self.store_view(ui);
+            self.active = i;
+            self.apply_view(ui);
+            self.selected = None;
+            self.drag_orig = None;
+            self.resize_orig = None;
+            self.refresh_all();
+        }
+        self.refresh_tabs();
+    }
+
+    /// Page tab actions. `i` is the tab the action targets, or -1 for the
+    /// active page. Open editors were committed by the UI beforehand.
+    fn page_op(&mut self, ui: &MainWindow, op: &str, i: i32) {
+        let n = self.doc.pages.len();
+        let i = usize::try_from(i).ok().filter(|&i| i < n).unwrap_or(self.active);
+        match op {
+            "select" => self.show_page(ui, i),
+            "next" => self.show_page(ui, (self.active + 1) % n),
+            "prev" => self.show_page(ui, (self.active + n - 1) % n),
+            "add" => {
+                self.snapshot();
+                let page = Page::new(self.doc.next_page_name());
+                self.doc.pages.insert(self.active + 1, page);
+                self.mark_dirty();
+                self.show_page(ui, self.active + 1);
+                ui.set_rename_page(self.active as i32);
+            }
+            "duplicate" => {
+                self.snapshot();
+                let mut page = self.doc.pages[i].clone();
+                page.id = doc::new_id();
+                page.name = format!("{} copy", page.name);
+                // Node ids stay unique across the whole file.
+                for node in &mut page.nodes {
+                    node.id = doc::new_id();
+                }
+                if i == self.active {
+                    self.store_view(ui);
+                    page.view = self.doc.pages[i].view.clone();
+                }
+                self.doc.pages.insert(i + 1, page);
+                if self.active > i {
+                    self.active += 1;
+                }
+                self.mark_dirty();
+                self.show_page(ui, i + 1);
+            }
+            "rename" => ui.set_rename_page(i as i32),
+            "move-left" | "move-right" => {
+                let j = if op == "move-left" { i.checked_sub(1) } else { Some(i + 1).filter(|&j| j < n) };
+                let Some(j) = j else { return };
+                self.snapshot();
+                self.doc.pages.swap(i, j);
+                if self.active == i {
+                    self.active = j;
+                } else if self.active == j {
+                    self.active = i;
+                }
+                self.mark_dirty();
+                self.refresh_tabs();
+            }
+            "delete" => {
+                if n == 1 {
+                    self.message = "cannot delete the only page".into();
+                    return;
+                }
+                self.snapshot();
+                self.store_view(ui);
+                self.doc.pages.remove(i);
+                let was_active = i == self.active;
+                if self.active > i || self.active == n - 1 {
+                    self.active -= 1;
+                }
+                if was_active {
+                    self.apply_view(ui);
+                    self.selected = None;
+                    self.refresh_all();
+                }
+                self.mark_dirty();
+                self.refresh_tabs();
+                self.message = "page deleted (Ctrl+Z to undo)".into();
+            }
+            _ => {}
+        }
+    }
+
+    fn rename_page(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        if i < self.doc.pages.len() && !name.is_empty() && self.doc.pages[i].name != name {
+            self.snapshot();
+            self.doc.pages[i].name = name.to_string();
+            self.mark_dirty();
+        }
+        self.refresh_tabs();
     }
 
     fn save_as_dialog(&self) -> Option<PathBuf> {
@@ -263,11 +406,11 @@ impl App {
 
     /// Zoom and pan so every node is visible.
     fn zoom_fit(&self, ui: &MainWindow) {
-        if self.doc.nodes.is_empty() {
+        if self.nodes().is_empty() {
             return;
         }
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-        for (i, n) in self.doc.nodes.iter().enumerate() {
+        for (i, n) in self.nodes().iter().enumerate() {
             let h = self.model.row_data(i).map(|v| v.h as f64).unwrap_or(0.0);
             x0 = x0.min(n.x);
             y0 = y0.min(n.y);
@@ -322,8 +465,8 @@ impl App {
     }
 
     fn push_node(&mut self, node: Node) -> usize {
-        self.doc.nodes.push(node);
-        let i = self.doc.nodes.len() - 1;
+        self.nodes_mut().push(node);
+        let i = self.nodes().len() - 1;
         self.selected = Some(i);
         self.model.push(self.build_vm(i));
         self.update_selection_flags();
@@ -398,7 +541,7 @@ impl App {
 
     /// The node as standalone Typst markup, for the clipboard.
     fn node_as_typst(&self, i: usize) -> String {
-        let n = &self.doc.nodes[i];
+        let n = &self.nodes()[i];
         match n.kind.as_str() {
             "table" => n.table.as_ref().map(Table::to_typst).unwrap_or_default(),
             "image" => format!("#image(\"{}\")\n", n.src.clone().unwrap_or_default()),
@@ -424,7 +567,7 @@ impl App {
         self.selected = Some(i);
         self.update_selection_flags();
         self.drag_orig = None;
-        let node = &self.doc.nodes[i];
+        let node = &self.nodes()[i];
         if node.kind == "table" {
             self.edit_table = Some(node.table.clone().unwrap_or_else(Table::starter));
             ui.invoke_begin_table_edit(i as i32);
@@ -442,7 +585,7 @@ impl App {
         let i = ui.get_table_edit_index();
         let node_w = usize::try_from(i)
             .ok()
-            .and_then(|i| self.doc.nodes.get(i))
+            .and_then(|i| self.nodes().get(i))
             .map_or(DEFAULT_WIDTH, |n| n.width);
         let zoom = ui.get_zoom().max(0.01) as f64;
         let total = node_w.max(TABLE_EDITOR_MIN_WIDTH / zoom);
@@ -483,7 +626,7 @@ impl App {
         let zoom = ui.get_zoom().max(0.01) as f64;
         let node_w = usize::try_from(ui.get_table_edit_index())
             .ok()
-            .and_then(|i| self.doc.nodes.get(i))
+            .and_then(|i| self.nodes().get(i))
             .map_or(DEFAULT_WIDTH, |n| n.width);
         let widths = t.column_widths(node_w.max(TABLE_EDITOR_MIN_WIDTH / zoom), TABLE_EDITOR_MIN_COL);
         self.col_resize_orig = widths.get(col).copied();
@@ -533,15 +676,15 @@ impl App {
         let i = ui.get_table_edit_index();
         if let (Some(t), true) = (self.edit_table.take(), i >= 0) {
             let i = i as usize;
-            if i < self.doc.nodes.len() && self.doc.nodes[i].table.as_ref() != Some(&t) {
+            if i < self.nodes().len() && self.nodes()[i].table.as_ref() != Some(&t) {
                 self.snapshot();
                 // Widen the node if fixed column widths no longer fit.
                 let needed = t.min_width_px(TABLE_EDITOR_MIN_COL) + 16.0;
-                if needed > self.doc.nodes[i].width {
+                if needed > self.nodes()[i].width {
                     let w = self.doc.snap(needed).max(needed);
-                    self.doc.nodes[i].width = w;
+                    self.nodes_mut()[i].width = w;
                 }
-                self.doc.nodes[i].table = Some(t);
+                self.nodes_mut()[i].table = Some(t);
                 self.refresh_node(i);
                 self.mark_dirty();
             }
@@ -552,49 +695,65 @@ impl App {
     fn delete_selected(&mut self) {
         if let Some(i) = self.selected {
             self.snapshot();
-            self.doc.nodes.remove(i);
+            self.nodes_mut().remove(i);
             self.model.remove(i);
             self.selected = None;
             self.mark_dirty();
         }
     }
 
-    fn undo(&mut self) {
+    fn undo(&mut self, ui: &MainWindow) {
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.doc.nodes, prev));
-            self.selected = None;
-            self.refresh_all();
-            self.mark_dirty();
+            let current = self.restore(ui, prev);
+            self.redo.push(current);
         }
     }
 
-    fn redo(&mut self) {
+    fn redo(&mut self, ui: &MainWindow) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.doc.nodes, next));
-            self.selected = None;
-            self.refresh_all();
-            self.mark_dirty();
+            let current = self.restore(ui, next);
+            self.undo.push(current);
         }
+    }
+
+    /// Swap in an undo/redo state and return the replaced one, tagged with the
+    /// same page so stepping back again returns there. Viewports are not part
+    /// of the history, so each page keeps its current one.
+    fn restore(&mut self, ui: &MainWindow, snap: Snapshot) -> Snapshot {
+        self.store_view(ui);
+        let pages = std::mem::replace(&mut self.doc.pages, snap.pages);
+        for page in &mut self.doc.pages {
+            if let Some(old) = pages.iter().find(|p| p.id == page.id) {
+                page.view = old.view.clone();
+            }
+        }
+        self.active = snap.active.min(self.doc.pages.len() - 1);
+        self.apply_view(ui);
+        self.selected = None;
+        self.refresh_all();
+        self.refresh_tabs();
+        self.mark_dirty();
+        Snapshot { pages, active: self.active }
     }
 
     /// Spatial navigation: pick the node in the given direction whose center
     /// lies within a 90 degree cone, minimizing along + 2 * across distance.
     fn navigate(&mut self, dx: f64, dy: f64) {
         let Some(cur) = self.selected else {
-            if !self.doc.nodes.is_empty() {
+            if !self.nodes().is_empty() {
                 self.selected = Some(0);
                 self.update_selection_flags();
             }
             return;
         };
         let center = |i: usize| {
-            let n = &self.doc.nodes[i];
+            let n = &self.nodes()[i];
             let h = self.model.row_data(i).map(|v| v.h as f64).unwrap_or(0.0);
             (n.x + n.width / 2.0, n.y + h / 2.0)
         };
         let (cx, cy) = center(cur);
         let mut best: Option<(f64, usize)> = None;
-        for i in 0..self.doc.nodes.len() {
+        for i in 0..self.nodes().len() {
             if i == cur {
                 continue;
             }
@@ -663,8 +822,9 @@ fn status(app: &App, ui: &MainWindow) {
     ui.set_status_left(left.into());
     ui.set_status_right(
         format!(
-            "{} nodes   zoom {:.0}%",
-            app.doc.nodes.len(),
+            "{}   {} nodes   zoom {:.0}%",
+            app.doc.pages[app.active].name,
+            app.nodes().len(),
             ui.get_zoom() * 100.0
         )
         .into(),
@@ -691,11 +851,11 @@ fn main() {
     ui.set_edit_cells(cell_model.clone().into());
     let edge_model = Rc::new(VecModel::<ColEdge>::default());
     ui.set_edit_col_edges(edge_model.clone().into());
-    ui.set_pan_x(doc.view.x as f32);
-    ui.set_pan_y(doc.view.y as f32);
-    ui.set_zoom(doc.view.zoom as f32);
+    let tab_model = Rc::new(VecModel::<PageTab>::default());
+    ui.set_pages(tab_model.clone().into());
 
     let app = Rc::new(RefCell::new(App {
+        active: doc.start_page(),
         doc,
         path,
         dirty: false,
@@ -708,13 +868,19 @@ fn main() {
         message: String::new(),
         renderer: Renderer::new(),
         model,
+        tab_model,
         edit_table: None,
         cell_map: Vec::new(),
         cell_model,
         edge_model,
         col_resize_orig: None,
     }));
-    app.borrow().refresh_all();
+    {
+        let a = app.borrow();
+        a.apply_view(&ui);
+        a.refresh_all();
+        a.refresh_tabs();
+    }
     status(&app.borrow(), &ui);
 
     macro_rules! hook {
@@ -735,18 +901,18 @@ fn main() {
         let i = i as usize;
         a.selected = Some(i);
         a.update_selection_flags();
-        a.drag_orig = Some((a.doc.nodes[i].x, a.doc.nodes[i].y));
+        a.drag_orig = Some((a.nodes()[i].x, a.nodes()[i].y));
         a.message.clear();
     });
 
     hook!(on_node_drag, |a, _u, i, dx, dy| {
         let i = i as usize;
         if let Some((ox, oy)) = a.drag_orig {
-            a.doc.nodes[i].x = ox + dx as f64;
-            a.doc.nodes[i].y = oy + dy as f64;
+            a.nodes_mut()[i].x = ox + dx as f64;
+            a.nodes_mut()[i].y = oy + dy as f64;
             if let Some(mut vm) = a.model.row_data(i) {
-                vm.x = a.doc.nodes[i].x as f32;
-                vm.y = a.doc.nodes[i].y as f32;
+                vm.x = a.nodes()[i].x as f32;
+                vm.y = a.nodes()[i].y as f32;
                 a.model.set_row_data(i, vm);
             }
         }
@@ -755,17 +921,18 @@ fn main() {
     hook!(on_node_drag_end, |a, _u, i| {
         let i = i as usize;
         if let Some((ox, oy)) = a.drag_orig.take() {
-            let n = &a.doc.nodes[i];
+            let n = &a.nodes()[i];
             let (nx, ny) = (a.doc.snap(n.x), a.doc.snap(n.y));
             if (nx, ny) != (ox, oy) {
                 // Record the pre-drag state for undo.
-                let mut before = a.doc.nodes.clone();
-                before[i].x = ox;
-                before[i].y = oy;
-                a.undo.push(before);
+                let mut before = a.doc.pages.clone();
+                before[a.active].nodes[i].x = ox;
+                before[a.active].nodes[i].y = oy;
+                let active = a.active;
+                a.undo.push(Snapshot { pages: before, active });
                 a.redo.clear();
-                a.doc.nodes[i].x = nx;
-                a.doc.nodes[i].y = ny;
+                a.nodes_mut()[i].x = nx;
+                a.nodes_mut()[i].y = ny;
                 if let Some(mut vm) = a.model.row_data(i) {
                     vm.x = nx as f32;
                     vm.y = ny as f32;
@@ -773,8 +940,8 @@ fn main() {
                 }
                 a.mark_dirty();
             } else {
-                a.doc.nodes[i].x = ox;
-                a.doc.nodes[i].y = oy;
+                a.nodes_mut()[i].x = ox;
+                a.nodes_mut()[i].y = oy;
                 if let Some(mut vm) = a.model.row_data(i) {
                     vm.x = ox as f32;
                     vm.y = oy as f32;
@@ -787,7 +954,7 @@ fn main() {
     hook!(on_node_resize, |a, _u, i, dw| {
         let i = i as usize;
         if a.resize_orig.is_none() {
-            a.resize_orig = Some(a.doc.nodes[i].width);
+            a.resize_orig = Some(a.nodes()[i].width);
         }
         let ow = a.resize_orig.unwrap();
         let w = (ow + dw as f64).max(40.0);
@@ -808,7 +975,7 @@ fn main() {
             let w = a.doc.snap(w).max(40.0);
             if w != ow {
                 a.snapshot();
-                a.doc.nodes[i].width = w;
+                a.nodes_mut()[i].width = w;
                 a.refresh_node(i);
                 a.mark_dirty();
             } else {
@@ -823,12 +990,12 @@ fn main() {
 
     hook!(on_node_menu, |a, u, op, i| {
         let i = i as usize;
-        if i >= a.doc.nodes.len() {
+        if i >= a.nodes().len() {
             return;
         }
         match op.as_str() {
             "edit" => a.open_editor(&u, i),
-            "copy-typst" if a.doc.nodes[i].data.is_some() => {
+            "copy-typst" if a.nodes()[i].data.is_some() => {
                 a.message = "embedded image has no file path to reference in Typst".into();
             }
             "copy-typst" => {
@@ -876,6 +1043,16 @@ fn main() {
         u.invoke_end_table_edit();
     });
 
+    hook!(on_page_op, |a, u, op, i| {
+        a.page_op(&u, op.as_str(), i);
+    });
+
+    hook!(on_page_renamed, |a, u, i, name| {
+        u.set_rename_page(-1);
+        a.rename_page(i as usize, name.as_str());
+        u.invoke_focus_canvas();
+    });
+
     hook!(on_background_clicked, |a, _u| {
         a.selected = None;
         a.update_selection_flags();
@@ -890,9 +1067,9 @@ fn main() {
     hook!(on_commit_edit, |a, u, i, text| {
         let i = i as usize;
         let text = text.to_string();
-        if a.doc.nodes[i].source != text {
+        if a.nodes()[i].source != text {
             a.snapshot();
-            a.doc.nodes[i].source = text;
+            a.nodes_mut()[i].source = text;
             a.refresh_node(i);
             a.mark_dirty();
         }
@@ -904,7 +1081,7 @@ fn main() {
         u.invoke_end_edit();
         if i >= 0 {
             let i = i as usize;
-            if i < a.doc.nodes.len() && a.doc.nodes[i].source.is_empty() {
+            if i < a.nodes().len() && a.nodes()[i].source.is_empty() {
                 a.selected = Some(i);
                 a.delete_selected();
             }
@@ -919,7 +1096,7 @@ fn main() {
         if ctrl {
             // Most Ctrl shortcuts are declared on the menu bar and never reach here.
             if shift && (k == "z" || k == "Z") {
-                a.redo();
+                a.redo(&u);
                 return true;
             }
             // Ctrl+V is handled here rather than as a menu shortcut: menu
@@ -1010,8 +1187,8 @@ fn main() {
                     slint::quit_event_loop().ok();
                 }
             }
-            "undo" if !editing => a.undo(),
-            "redo" if !editing => a.redo(),
+            "undo" if !editing => a.undo(&u),
+            "redo" if !editing => a.redo(&u),
             "add-node" if !editing => {
                 let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
                 let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();

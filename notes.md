@@ -57,21 +57,32 @@ It mirrors the serde structs in `src/doc.rs`; change both together. Validate a f
 
 ```json
 {
-  "version": 0,
-  "view": { "x": 0, "y": 0, "zoom": 1.0 },
+  "version": 1,
   "preamble": "#set text(font: \"Inter\")",
-  "nodes": [
-    { "id": "a1b2", "type": "typst", "x": 0, "y": 0, "width": 400,
-      "height": null, "source": "= Title\n- one\n- two\n$ x^2 $" },
-    { "id": "c3d4", "type": "image", "x": 500, "y": 0, "width": 300,
-      "height": 200, "src": "img/diagram.png" }
+  "page": "p1",
+  "pages": [
+    { "id": "p1", "name": "Overview", "view": { "x": 0, "y": 0, "zoom": 1.0 },
+      "nodes": [
+        { "id": "a1b2", "type": "typst", "x": 0, "y": 0, "width": 400,
+          "height": null, "source": "= Title\n- one\n- two\n$ x^2 $" },
+        { "id": "c3d4", "type": "image", "x": 500, "y": 0, "width": 300,
+          "height": 200, "src": "img/diagram.png" }
+      ] },
+    { "id": "p2", "name": "Scratch", "nodes": [] }
   ]
 }
 ```
 
+- `pages` are tabs within one file. Each page has its own `nodes` and `view`;
+  `grid` and `preamble` are shared. `page` is the id of the tab to open on.
+  Node ids stay unique across the whole file so nodes can move between pages.
+- Version 0 files (top-level `view` and `nodes`, no pages) still load, as a single
+  "Page 1", and are written back as version 1. A file with a version newer than the
+  build supports is refused rather than half-read.
+
 - `height: null` means auto (from render). A number means the user resized it.
 - `id` is a short random string like JSON Canvas uses.
-- `edges` and `groups` can be added later as top-level arrays without breaking v0 files.
+- `edges` and `groups` can be added later as per-page arrays.
 - Code blocks and math are just Typst source, so `typst` is the only prose node type.
 - `table` nodes carry a `table` object that mirrors Typst's `table()` call (see
   `src/table.rs`): `columns`/`rows` track sizes, `cells` as a 2D array in emission
@@ -176,6 +187,14 @@ Working:
   shortcuts before the focused widget and would swallow text paste in editors.
   "Copy as Typst" does nothing useful for embedded images (there is no path).
 
+- Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
+  or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a
+  new page, Ctrl+PgUp/PgDn to cycle. Each page restores its own viewport. Page
+  add, rename, reorder, and delete are undoable; undo snapshots hold every page
+  and switch to the page the change was made on. Switching pages commits an open
+  node or table editor first.
+
 Not yet:
 - Manual height (`height` is respected if set in JSON, but there is no UI for it).
+- Moving a node to another page (cut/paste or a "Move to page" menu).
 - Off-thread rendering; compiles run on the UI thread and are fast enough so far.

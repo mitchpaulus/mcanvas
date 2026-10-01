@@ -727,7 +727,7 @@ mod tests {
             "/examples/demo.mc"
         )))
         .unwrap();
-        let node = canvas.nodes.iter().find(|n| n.kind == "table").expect("demo has a table node");
+        let node = canvas.pages.iter().flat_map(|p| &p.nodes).find(|n| n.kind == "table").expect("demo has a table node");
         let src = node.table.as_ref().unwrap().to_typst();
         let r = crate::render::Renderer::new();
         let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples"));

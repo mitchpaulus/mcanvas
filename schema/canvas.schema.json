@@ -9,7 +9,7 @@
   ],
   "properties": {
     "version": {
-      "description": "File format version. Currently 0.",
+      "description": "File format version. Currently 1. Version 0 files kept one canvas in top-level `view` and `nodes`; they are still read, as a single page, and are saved as version 1.",
       "type": "integer",
       "minimum": 0
     },
@@ -18,26 +18,70 @@
       "type": "number",
       "default": 8
     },
-    "view": {
-      "description": "Saved viewport. Defaults to origin at zoom 1 when omitted.",
-      "$ref": "#/$defs/view"
-    },
     "preamble": {
       "description": "Typst source prepended to every node before compiling (fonts, colors, #let helpers). Defaults to empty.",
       "type": "string",
       "default": ""
     },
+    "page": {
+      "description": "Id of the page shown when the file is opened. Omitted or unknown means the first page.",
+      "type": "string"
+    },
+    "pages": {
+      "description": "Pages (tabs), in tab order. Each has its own nodes and viewport; `grid` and `preamble` are shared. When empty or omitted the app starts with one empty page.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/page"
+      },
+      "default": []
+    },
+    "view": {
+      "description": "Version 0 only: viewport of the single canvas. Read into the first page; never written.",
+      "$ref": "#/$defs/view",
+      "deprecated": true
+    },
     "nodes": {
-      "description": "Blocks on the canvas. Defaults to empty.",
+      "description": "Version 0 only: nodes of the single canvas. Read as a page placed before `pages`; never written.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/node"
       },
-      "default": []
+      "deprecated": true
     }
   },
   "additionalProperties": true,
   "$defs": {
+    "page": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "description": "Short random identifier, unique among pages. Same format as node ids.",
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "description": "Tab label.",
+          "type": "string"
+        },
+        "view": {
+          "description": "Saved viewport for this page. Defaults to origin at zoom 1 when omitted.",
+          "$ref": "#/$defs/view"
+        },
+        "nodes": {
+          "description": "Blocks on this page. Node ids are unique across the whole file, not just the page. Defaults to empty.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": true
+    },
     "view": {
       "type": "object",
       "required": [
