@@ -10,7 +10,7 @@ pub const GRID: f64 = 8.0;
 pub const VERSION: u32 = 1;
 
 // The on-disk JSON format is described by schema/canvas.schema.json.
-// When you change `Canvas`, `Page`, `View`, or `Node` (fields, defaults, renames),
+// When you change `Canvas`, `Page`, `View`, `Node`, or `Arrow` (fields, defaults, renames),
 // update the schema in the same commit and re-run `cargo test`.
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -49,10 +49,53 @@ pub struct Node {
     pub table: Option<Table>,
 }
 
-/// One tab of the canvas: its own nodes and viewport. The grid and preamble
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    North,
+    East,
+    South,
+    West,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Routing {
+    #[default]
+    Straight,
+    Orthogonal,
+}
+
+/// Saved linking intent. Coordinates record the initial selection; routing may
+/// relocate the shared segment without changing this intent.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Trunk {
+    pub id: String,
+    pub vertical: bool,
+    pub coordinate: f64,
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Arrow {
+    pub id: String,
+    pub from: String,
+    pub from_side: Side,
+    pub to: String,
+    pub to_side: Side,
+    #[serde(default)]
+    pub routing: Routing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trunk: Option<Trunk>,
+}
+
+/// One tab of the canvas: its own nodes, arrows, and viewport. The grid and preamble
 /// are shared by every page.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Page {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arrows: Vec<Arrow>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -63,7 +106,7 @@ pub struct Page {
 
 impl Page {
     pub fn new(name: String) -> Page {
-        Page { id: new_id(), name, view: View::default(), nodes: Vec::new() }
+        Page { arrows: Vec::new(), id: new_id(), name, view: View::default(), nodes: Vec::new() }
     }
 }
 
@@ -182,6 +225,35 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrow_example_references_nodes_on_its_page() {
+        let canvas = Canvas::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/arrows.mc"))).unwrap();
+        let page = &canvas.pages[0];
+        assert_eq!(page.arrows.len(), 3);
+        for arrow in &page.arrows {
+            assert!(page.nodes.iter().any(|n| n.id == arrow.from));
+            assert!(page.nodes.iter().any(|n| n.id == arrow.to));
+        }
+        let back: Canvas = serde_json::from_str(&serde_json::to_string(&canvas).unwrap()).unwrap();
+        assert_eq!(back.pages, canvas.pages);
+    }
+
+    #[test]
+    fn arrows_round_trip_and_old_pages_default_to_empty() {
+        let page: Page = serde_json::from_str(r#"{"id":"p","name":"Arrows","arrows":[
+            {"id":"e","from":"a","from_side":"east","to":"b","to_side":"west","routing":"orthogonal","trunk":{"id":"link","vertical":true,"coordinate":200,"start":40,"end":240}},
+            {"id":"f","from":"b","from_side":"south","to":"a","to_side":"north"}
+        ]}"#).unwrap();
+        assert_eq!(page.arrows[0].routing, Routing::Orthogonal);
+        assert_eq!(page.arrows[1].routing, Routing::Straight);
+        assert!(page.arrows[0].trunk.is_some());
+        assert!(page.arrows[1].trunk.is_none());
+        assert_eq!(serde_json::from_str::<Page>(&serde_json::to_string(&page).unwrap()).unwrap(), page);
+        let old: Page = serde_json::from_str(r#"{"id":"p","name":"Old"}"#).unwrap();
+        assert!(old.arrows.is_empty());
+        assert!(serde_json::from_str::<Side>(r#""diagonal""#).is_err());
+    }
 
     #[test]
     fn demo_file_matches_document_model() {

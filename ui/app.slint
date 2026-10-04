@@ -1,3 +1,18 @@
+export struct LinkSegmentVm {
+    arrow: int, segment: int,
+    x: length, y: length, w: length, h: length,
+    selected: bool, eligible: bool, reason: string,
+}
+
+export struct ArrowVm {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    commands: string,
+    color: color,
+}
+
 export struct NodeVm {
     id: string,
     x: length,
@@ -38,12 +53,13 @@ export struct PageTab {
 component ToolButton inherits Rectangle {
     in property <image> icon;
     in property <string> tip;
+    in property <bool> active: false;
     callback clicked;
 
     width: 30px;
     height: 30px;
     border-radius: 4px;
-    background: ta.pressed ? #cfcfcb : ta.has-hover ? #dededa : transparent;
+    background: root.active ? #bfdbfe : ta.pressed ? #cfcfcb : ta.has-hover ? #dededa : transparent;
     accessible-role: button;
     accessible-label: tip;
 
@@ -71,6 +87,15 @@ export component MainWindow inherits Window {
     forward-focus: keys;
 
     in-out property <[NodeVm]> nodes;
+    in-out property <[ArrowVm]> arrows;
+    // 0 = select, 1 = straight arrow, 2 = orthogonal arrow, 3 = link middles.
+    in-out property <int> connect-mode: 0;
+    callback port-clicked(int, int);
+    in-out property <[LinkSegmentVm]> link-segments;
+    in-out property <int> link-step: 1;
+    in-out property <int> link-hover: -1;
+    in-out property <string> link-hint;
+    callback link-pointer(length, length, bool);
     in-out property <length> pan-x: 0;
     in-out property <length> pan-y: 0;
     in-out property <float> zoom: 1.0;
@@ -97,7 +122,7 @@ export component MainWindow inherits Window {
     callback node-edit-request(int);
     // Node context menu: "edit", "copy-typst", "delete".
     callback node-menu(string, int);
-    callback background-clicked();
+    callback background-clicked(length, length);
     callback background-double-clicked(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
@@ -178,7 +203,11 @@ export component MainWindow inherits Window {
             MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
             MenuItem { title: "Add Table"; shortcut: @keys(Control + Shift + T); activated => { root.command("add-table"); } }
             MenuItem { title: "Edit Node"; activated => { root.command("edit-node"); } }
-            MenuItem { title: "Delete Node"; activated => { root.command("delete"); } }
+            MenuItem { title: "Straight Arrow"; activated => { root.command("arrow-straight"); } }
+            MenuItem { title: "Orthogonal Arrow"; activated => { root.command("arrow-orthogonal"); } }
+            MenuItem { title: "Link Middles"; activated => { root.command("link-middles"); } }
+            MenuItem { title: "Unlink Middles"; activated => { root.command("unlink-middles"); } }
+            MenuItem { title: "Delete Node or Arrow"; activated => { root.command("delete"); } }
         }
         Menu {
             title: "View";
@@ -225,7 +254,11 @@ export component MainWindow inherits Window {
                 Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
                 ToolButton { icon: @image-url("icons/add-node.svg"); tip: "Add node"; clicked => { root.command("add-node"); } }
                 ToolButton { icon: @image-url("icons/add-table.svg"); tip: "Add table"; clicked => { root.command("add-table"); } }
-                ToolButton { icon: @image-url("icons/delete.svg"); tip: "Delete node"; clicked => { root.command("delete"); } }
+                ToolButton { icon: @image-url("icons/arrow-straight.svg"); tip: "Straight arrow: click two attachment points; changes selected arrow"; clicked => { root.command("arrow-straight"); } }
+                ToolButton { icon: @image-url("icons/arrow-orthogonal.svg"); tip: "Orthogonal arrow: click two attachment points; changes selected arrow"; clicked => { root.command("arrow-orthogonal"); } }
+                ToolButton { active: root.connect-mode == 3; icon: @image-url("icons/link.svg"); tip: "Link middles: click two parallel orthogonal middle segments"; clicked => { root.command("link-middles"); } }
+                ToolButton { icon: @image-url("icons/unlink.svg"); tip: "Unlink middles of selected arrow"; clicked => { root.command("unlink-middles"); } }
+                ToolButton { icon: @image-url("icons/delete.svg"); tip: "Delete node or arrow"; clicked => { root.command("delete"); } }
                 Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
                 ToolButton { icon: @image-url("icons/zoom-in.svg"); tip: "Zoom in"; clicked => { root.command("zoom-in"); } }
                 ToolButton { icon: @image-url("icons/zoom-out.svg"); tip: "Zoom out"; clicked => { root.command("zoom-out"); } }
@@ -272,7 +305,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     clicked => {
-                        root.background-clicked();
+                        root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
                         keys.focus();
                     }
                     double-clicked => {
@@ -293,6 +326,23 @@ export component MainWindow inherits Window {
                         }
                         accept
                     }
+                }
+
+                // Path reserves half its stroke on each side. Compensate so
+                // its viewbox maps exactly to canvas coordinates.
+                for arrow in root.arrows : Path {
+                    x: root.pan-x + (arrow.x - 1px) * root.zoom;
+                    y: root.pan-y + (arrow.y - 1px) * root.zoom;
+                    width: (arrow.w + 2px) * root.zoom;
+                    height: (arrow.h + 2px) * root.zoom;
+                    commands: arrow.commands;
+                    viewbox-width: arrow.w / 1px;
+                    viewbox-height: arrow.h / 1px;
+                    fill: transparent;
+                    stroke: arrow.color;
+                    stroke-width: 2px * root.zoom;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
                 }
 
                 // Node geometry is snapped to whole physical pixels. The SVG
@@ -386,6 +436,120 @@ export component MainWindow inherits Window {
                         Rectangle {
                             x: 4px; y: 4px; width: 6px; height: 6px;
                             background: n.selected ? #3b82f6 : #bbbbbb;
+                        }
+                    }
+                }
+
+                // Ports sit above nodes so the full target remains clickable.
+                for n[i] in root.nodes : Rectangle {
+                    visible: root.connect-mode == 1 || root.connect-mode == 2;
+                    x: root.pan-x + n.x * root.zoom;
+                    y: root.pan-y + n.y * root.zoom;
+                    width: n.w * root.zoom;
+                    height: n.h * root.zoom;
+                    for side in 4 : Rectangle {
+                        x: (side == 1 ? parent.width : side == 3 ? 0px : parent.width / 2) - 6px;
+                        y: (side == 2 ? parent.height : side == 0 ? 0px : parent.height / 2) - 6px;
+                        width: 12px; height: 12px;
+                        border-radius: 6px;
+                        background: port.has-hover ? #2563eb : white;
+                        border-width: 2px;
+                        border-color: #2563eb;
+                        port := TouchArea {
+                            mouse-cursor: crosshair;
+                            clicked => { root.port-clicked(i, side); keys.focus(); }
+                        }
+                    }
+                }
+
+                if root.connect-mode == 3 : Rectangle {
+                    // The wide band is the actual landing range: 36 screen px.
+                    for segment[i] in root.link-segments : Rectangle {
+                        x: root.pan-x + segment.x * root.zoom - 18px;
+                        y: root.pan-y + segment.y * root.zoom - 18px;
+                        width: segment.w * root.zoom + 36px;
+                        height: segment.h * root.zoom + 36px;
+                        border-radius: 18px;
+                        background: i == root.link-hover ? (segment.eligible ? #4ade8030 : #ef444430) : segment.eligible ? #3b82f610 : transparent;
+                        Rectangle {
+                            x: segment.w == 0px ? (parent.width - self.width) / 2 : 18px;
+                            y: segment.h == 0px ? (parent.height - self.height) / 2 : 18px;
+                            width: max(segment.w * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
+                            height: max(segment.h * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
+                            border-radius: 4px;
+                            background: segment.selected ? #9333ea : i == root.link-hover ? (segment.eligible ? #16a34a : #dc2626) : segment.eligible ? #3b82f680 : transparent;
+                        }
+                    }
+                    // Paint the hovered segment last so coincident candidates
+                    // cannot obscure which arrow the next click will choose.
+                    if root.link-hover >= 0 : Rectangle {
+                        property <LinkSegmentVm> segment: root.link-segments[root.link-hover];
+                        x: root.pan-x + self.segment.x * root.zoom - (self.segment.w == 0px ? 4px : 0px);
+                        y: root.pan-y + self.segment.y * root.zoom - (self.segment.h == 0px ? 4px : 0px);
+                        width: max(self.segment.w * root.zoom, 8px);
+                        height: max(self.segment.h * root.zoom, 8px);
+                        border-radius: 4px;
+                        background: self.segment.eligible ? #16a34a : #dc2626;
+                    }
+                    link-area := TouchArea {
+                        mouse-cursor: root.link-hover >= 0 && root.link-segments[root.link-hover].eligible ? pointer : not-allowed;
+                        changed mouse-x => {
+                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                        }
+                        changed mouse-y => {
+                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                        }
+                        changed has-hover => {
+                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                        }
+                        clicked => {
+                            root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                            keys.focus();
+                        }
+                        scroll-event(e) => {
+                            if (e.modifiers.control) {
+                                root.zoom-at(clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom, self.mouse-x, self.mouse-y);
+                            } else {
+                                root.pan-x += e.delta-x;
+                                root.pan-y += e.delta-y;
+                            }
+                            root.link-pointer((self.mouse-x - root.pan-x)/root.zoom,(self.mouse-y - root.pan-y)/root.zoom,true);
+                            accept
+                        }
+                    }
+                    Rectangle {
+                        x: max(8px, (parent.width - self.width) / 2);
+                        y: 12px;
+                        width: min(640px, parent.width - 16px);
+                        height: 120px;
+                        background: #eff6ff;
+                        border-width: 2px;
+                        border-color: #3b82f6;
+                        border-radius: 8px;
+                        TouchArea { } // Keep banner clicks off the canvas.
+                        Text {
+                            x: 16px; y: 10px; height: 24px;
+                            text: root.link-step == 1 ? "Link middles · Step 1 of 2: choose the first segment" : "Link middles · Step 2 of 2: choose the second segment";
+                            font-weight: 700; color: #1e3a8a;
+                        }
+                        Text {
+                            x: 16px; y: 36px; width: parent.width - 32px; height: 28px;
+                            text: root.link-hint; font-size: 12px;
+                            color: root.link-hover >= 0 ? (root.link-segments[root.link-hover].eligible ? #15803d : #b91c1c) : #334155;
+                            wrap: word-wrap;
+                        }
+                        Text { x: 16px; y: 96px; text: "Blue: available   Purple: first selection   Green: ready to click"; font-size: 11px; color: #475569; }
+                        if root.link-step == 2 : Rectangle {
+                            x: parent.width - 154px; y: 68px; width: 62px; height: 25px;
+                            background: #dbeafe; border-radius: 4px;
+                            Text { text: "Back"; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.command("restart-link"); } }
+                        }
+                        Rectangle {
+                            x: parent.width - 84px; y: 68px; width: 72px; height: 25px;
+                            background: #dbeafe; border-radius: 4px;
+                            Text { text: "Cancel"; horizontal-alignment: center; vertical-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.command("cancel-link"); } }
                         }
                     }
                 }

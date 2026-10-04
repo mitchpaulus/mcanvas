@@ -198,3 +198,54 @@ Not yet:
 - Manual height (`height` is respected if set in JSON, but there is no UI for it).
 - Moving a node to another page (cut/paste or a "Move to page" menu).
 - Off-thread rendering; compiles run on the UI thread and are fast enough so far.
+
+## Arrows
+
+Choose **Straight Arrow** or **Orthogonal Arrow** in the toolbar or Edit menu,
+then click a cardinal attachment point on the source node and one on the
+destination node. Escape or clicking the background cancels creation.
+Click an arrow to select it; Delete removes it, and either arrow tool changes
+its routing. Click empty canvas before creating another arrow.
+
+Arrows follow node movement, resizing, and content height changes. They belong
+to a page, are saved in its `arrows` array, and participate in undo/redo. Removing
+a node also removes its arrows. Duplicating a page remaps its connections.
+
+Orthogonal routes avoid the source and destination interiors. Nearby parallel
+interior segments with overlapping spans align within 12 canvas units (independent
+of zoom); attachment points remain fixed. Unrelated nodes are not obstacles yet.
+
+### Manually linked middles
+
+Choose **Link Middles** in the toolbar or Edit menu, then click a middle segment
+on each of two orthogonal arrows. The segments must be parallel and their spans
+must overlap or meet; they need not be within the automatic 12-unit alignment tolerance.
+The shared segment is recalculated from the current layout, so it moves with
+the connected nodes rather than remaining at its original canvas position.
+
+Links are intent, not mandatory geometry. A group is applied only when every
+member can use one shared segment without loops, backtracking, crossing a
+connected node, or an excessive detour (more than 1.5 times its ordinary route
+plus 48 canvas units). Otherwise the whole group pauses: ordinary routes appear
+dashed amber, and the status bar explains that the intent is retained. Routing
+retries automatically on movement, resizing, or other geometry changes. A finite
+candidate search may pause a link rather than force a complicated route.
+
+Select either arrow and choose **Unlink Middles** to explicitly remove the
+intent. Automatic proximity alignment still applies after unlinking. Escape
+cancels link creation. Saved links survive layout changes and save/load. Switching
+a member to straight routing pauses the group; switching back can restore it.
+Deleting a member leaves the remaining intent paused, and undo restores it.
+Duplicating a page gives its links independent identities. Invalid or missing
+members suspend the group instead of partially applying it.
+
+Link mode displays a step banner (first segment / second segment), blue eligible
+segments, a purple first selection, and green/red hover feedback with a reason.
+The click radius is 18 screen pixels regardless of zoom; hover and click use the
+same nearest-eligible selection rule. Back restarts the selection; Cancel or
+Escape exits. The tool captures canvas clicks so a missed target cannot move or
+edit a node. Scrolling and zooming remain available.
+
+Orthogonal arrows sharing a port also align compatible branch runs whose spans
+meet at the shared stem, even outside the usual proximity tolerance. Alignment
+still checks the connected nodes, attachment directions, and backtracking.

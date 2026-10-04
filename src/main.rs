@@ -1,18 +1,19 @@
 #![windows_subsystem = "windows"]
 
+mod arrows;
 mod doc;
 mod picture;
 mod render;
 mod table;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 
-use doc::{Canvas, Node, Page};
+use doc::{Arrow, Canvas, Node, Page, Routing, Side};
 use render::Renderer;
 use table::Table;
 
@@ -22,6 +23,13 @@ const UNSAVED_WARN_AFTER: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_WIDTH: f64 = 320.0;
 /// Pasted images wider than this (canvas units) are scaled down to fit.
 const MAX_PASTE_WIDTH: f64 = 960.0;
+
+#[derive(PartialEq)]
+struct ArrowCacheKey {
+    nodes: Vec<(SharedString, f32, f32, f32, f32)>,
+    arrows: Vec<Arrow>,
+    selected: Option<usize>,
+}
 
 struct App {
     doc: Canvas,
@@ -33,6 +41,13 @@ struct App {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     selected: Option<usize>,
+    selected_arrow: Option<usize>,
+    arrow_start: Option<(String, Side)>,
+    link_start: Option<(String, usize)>,
+    link_model: Rc<VecModel<LinkSegmentVm>>,
+    blocked_links: Cell<usize>,
+    arrow_model: Rc<VecModel<ArrowVm>>,
+    arrow_cache: RefCell<Option<ArrowCacheKey>>,
     drag_orig: Option<(f64, f64)>,
     resize_orig: Option<f64>,
     message: String,
@@ -62,6 +77,159 @@ const TABLE_EDITOR_MIN_WIDTH: f64 = 480.0;
 const TABLE_EDITOR_MIN_COL: f64 = 48.0;
 
 impl App {
+    fn arrow_routes(&self) -> Vec<(usize, arrows::Route)> {
+        let rect = |id: &str| {
+            self.model
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| arrows::Rect {
+                    x: n.x as f64,
+                    y: n.y as f64,
+                    w: n.w as f64,
+                    h: n.h as f64,
+                })
+        };
+        let mut indices = Vec::new();
+        let mut routes = Vec::new();
+        for (i, e) in self.doc.pages[self.active].arrows.iter().enumerate() {
+            if let (Some(a), Some(b)) = (rect(&e.from), rect(&e.to)) {
+                indices.push(i);
+                routes.push(arrows::route(a, e.from_side, b, e.to_side, e.routing));
+            }
+        }
+        let mut indexed: Vec<_> = indices.into_iter().zip(routes).collect();
+        arrows::resolve_links(&self.doc.pages[self.active].arrows, &mut indexed);
+        let (indices, mut routes): (Vec<_>, Vec<_>) = indexed.into_iter().unzip();
+        arrows::normalize(&mut routes);
+        indices.into_iter().zip(routes).collect()
+    }
+
+    fn refresh_arrows(&self) {
+        let key = ArrowCacheKey {
+            nodes: self
+                .model
+                .iter()
+                .map(|n| (n.id, n.x, n.y, n.w, n.h))
+                .collect(),
+            arrows: self.doc.pages[self.active].arrows.clone(),
+            selected: self.selected_arrow,
+        };
+        if self.arrow_cache.borrow().as_ref() == Some(&key) {
+            return;
+        }
+        *self.arrow_cache.borrow_mut() = Some(key);
+        let routes = self.arrow_routes();
+        let page = &self.doc.pages[self.active];
+        let suspended: std::collections::HashSet<_> = page.arrows.iter().enumerate()
+            .filter(|(i,e)| e.trunk.is_some() && !routes.iter().any(|(j,r)| i==j && r.manual))
+            .filter_map(|(_,e)| e.trunk.as_ref().map(|t| &t.id)).collect();
+        self.blocked_links.set(suspended.len());
+        let rows: Vec<ArrowVm> = routes
+            .into_iter()
+            .map(|(i, route)| arrow_vm(&route.points, self.selected_arrow == Some(i), route.suspended))
+            .collect();
+        self.arrow_model.set_vec(rows);
+    }
+
+    fn clear_link(&mut self, i: usize) {
+        if let Some(trunk) = self.doc.pages[self.active]
+            .arrows
+            .get(i)
+            .and_then(|e| e.trunk.clone())
+        {
+            for arrow in &mut self.doc.pages[self.active].arrows {
+                if arrow.trunk.as_ref().is_some_and(|t| t.id == trunk.id) {
+                    arrow.trunk = None;
+                }
+            }
+        }
+    }
+
+    fn refresh_link_ui(&self, ui: &MainWindow) {
+        ui.set_link_hover(-1);
+        ui.set_link_hint("Move near a highlighted middle segment".into());
+        ui.set_link_step(if self.link_start.is_some() {2} else {1});
+        if ui.get_connect_mode()!=3 {
+            if self.link_model.row_count()>0 { self.link_model.set_vec(Vec::new()); }
+            return;
+        }
+        let routes=self.arrow_routes();
+        let first=self.link_start.as_ref().and_then(|(id,k)| routes.iter()
+            .find(|(i,_)| self.doc.pages[self.active].arrows[*i].id==*id).map(|(i,r)| (*i,*k,r)));
+        let mut rows=Vec::new();
+        for (i,r) in &routes {
+            if !r.orthogonal { continue; }
+            for (k,w) in r.points.windows(2).enumerate() {
+                if w[0]==w[1] { continue; }
+                let selected=first.is_some_and(|(j,segment,_)| j==*i && segment==k);
+                let reason = if k==0 || k+2>=r.points.len() { "Choose a middle segment, not an attachment" }
+                    else if self.doc.pages[self.active].arrows[*i].trunk.is_some() { "Already linked — unlink this arrow first" }
+                    else if let Some((j,first_k,first_r))=first {
+                        if j==*i { "Choose a different arrow" }
+                        else if arrows::shared_trunk(first_r,first_k,r,k).is_none() { "Choose a parallel segment whose span overlaps or meets the first" }
+                        else { "Click to link these two middles" }
+                    } else { "Click to select the first middle" };
+                let eligible=reason.starts_with("Click");
+                rows.push(LinkSegmentVm { arrow:*i as i32, segment:k as i32,
+                    x:w[0].0.min(w[1].0) as f32,y:w[0].1.min(w[1].1) as f32,
+                    w:(w[0].0-w[1].0).abs() as f32,h:(w[0].1-w[1].1).abs() as f32,
+                    selected,eligible,reason:reason.into() });
+            }
+        }
+        rows.sort_by_key(|row| row.selected);
+        self.link_model.set_vec(rows);
+        if !self.link_model.iter().any(|s| s.eligible) {
+            ui.set_link_hint("No compatible middle segments here. Cancel or go back to choose another.".into());
+        }
+    }
+
+    fn link_segment_at(&self, ui: &MainWindow, x: f64, y: f64) -> Option<usize> {
+        let candidates: Vec<_>=self.link_model.iter().map(|s| (
+            (s.x as f64,s.y as f64),((s.x+s.w) as f64,(s.y+s.h) as f64),s.eligible)).collect();
+        link_target(&candidates,(x,y),ui.get_zoom() as f64)
+    }
+
+    fn link_middle_clicked(&mut self, ui: &MainWindow, x: f64, y: f64) {
+        let routes = self.arrow_routes();
+        let hit = self.link_segment_at(ui,x,y).and_then(|row| self.link_model.row_data(row));
+        let Some(hit) = hit.filter(|hit| hit.eligible) else { return; };
+        let (i,k)=(hit.arrow as usize,hit.segment as usize);
+        if self.doc.pages[self.active].arrows[i].trunk.is_some() {
+            self.message =
+                "This arrow is already linked; select it and Unlink middles first".into();
+            return;
+        }
+        if let Some((id, first_k)) = &self.link_start {
+            let Some((first_i, first_route)) = routes
+                .iter()
+                .find(|(j, _)| self.doc.pages[self.active].arrows[*j].id == *id)
+            else {
+                return;
+            };
+            let Some((_, second_route)) = routes.iter().find(|(j, _)| *j == i) else { return; };
+            let Some(trunk) = arrows::shared_trunk(first_route, *first_k, second_route, k) else {
+                self.message = "Choose parallel middle segments with overlapping spans".into();
+                return;
+            };
+            let first_i = *first_i;
+            self.snapshot();
+            self.doc.pages[self.active].arrows[first_i].trunk = Some(trunk.clone());
+            self.doc.pages[self.active].arrows[i].trunk = Some(trunk);
+            self.link_start = None;
+            self.selected_arrow = Some(i);
+            self.mark_dirty();
+            ui.set_connect_mode(0);
+            self.message = "Middle segments linked; intent will resume automatically if temporarily paused".into();
+        } else {
+            self.link_start = Some((self.doc.pages[self.active].arrows[i].id.clone(), k));
+            self.selected_arrow = Some(i);
+            self.selected = None;
+            self.update_selection_flags();
+            self.message =
+                "Click a parallel middle segment on the other arrow (Esc cancels)".into();
+        }
+    }
+
     fn root_dir(&self) -> PathBuf {
         self.path
             .as_ref()
@@ -162,6 +330,7 @@ impl App {
     fn refresh_all(&self) {
         let vms: Vec<NodeVm> = (0..self.nodes().len()).map(|i| self.build_vm(i)).collect();
         self.model.set_vec(vms);
+        self.refresh_arrows();
     }
 
     fn refresh_tabs(&self) {
@@ -219,6 +388,7 @@ impl App {
     fn load_doc(&mut self, doc: Canvas, path: Option<PathBuf>, ui: &MainWindow) {
         self.active = doc.start_page();
         self.doc = doc;
+        ui.set_connect_mode(0);
         self.apply_view(ui);
         self.path = path;
         self.dirty = false;
@@ -226,6 +396,9 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.selected = None;
+        self.selected_arrow = None;
+        self.arrow_start = None;
+        self.link_start = None;
         self.drag_orig = None;
         self.resize_orig = None;
         self.message.clear();
@@ -257,8 +430,12 @@ impl App {
         if i != self.active {
             self.store_view(ui);
             self.active = i;
+            ui.set_connect_mode(0);
             self.apply_view(ui);
             self.selected = None;
+            self.selected_arrow = None;
+            self.arrow_start = None;
+            self.link_start = None;
             self.drag_orig = None;
             self.resize_orig = None;
             self.refresh_all();
@@ -269,6 +446,10 @@ impl App {
     /// Page tab actions. `i` is the tab the action targets, or -1 for the
     /// active page. Open editors were committed by the UI beforehand.
     fn page_op(&mut self, ui: &MainWindow, op: &str, i: i32) {
+        self.arrow_start = None;
+        self.link_start = None;
+        self.selected_arrow = None;
+        ui.set_connect_mode(0);
         let n = self.doc.pages.len();
         let i = usize::try_from(i).ok().filter(|&i| i < n).unwrap_or(self.active);
         match op {
@@ -289,8 +470,19 @@ impl App {
                 page.id = doc::new_id();
                 page.name = format!("{} copy", page.name);
                 // Node ids stay unique across the whole file.
+                let mut ids = std::collections::HashMap::new();
                 for node in &mut page.nodes {
+                    let old = node.id.clone();
                     node.id = doc::new_id();
+                    ids.insert(old, node.id.clone());
+                }
+                for arrow in &mut page.arrows {
+                    arrow.id = doc::new_id();
+                    if let Some(trunk) = &mut arrow.trunk {
+                        trunk.id = ids.entry(trunk.id.clone()).or_insert_with(doc::new_id).clone();
+                    }
+                    if let Some(id) = ids.get(&arrow.from) { arrow.from = id.clone(); }
+                    if let Some(id) = ids.get(&arrow.to) { arrow.to = id.clone(); }
                 }
                 if i == self.active {
                     self.store_view(ui);
@@ -330,8 +522,12 @@ impl App {
                     self.active -= 1;
                 }
                 if was_active {
+                    ui.set_connect_mode(0);
                     self.apply_view(ui);
                     self.selected = None;
+                    self.selected_arrow = None;
+                    self.arrow_start = None;
+                    self.link_start = None;
                     self.refresh_all();
                 }
                 self.mark_dirty();
@@ -417,6 +613,12 @@ impl App {
             x1 = x1.max(n.x + n.width);
             y1 = y1.max(n.y + h);
         }
+        for (_, route) in self.arrow_routes() {
+            for (x, y) in route.points {
+                x0 = x0.min(x); y0 = y0.min(y);
+                x1 = x1.max(x); y1 = y1.max(y);
+            }
+        }
         let pad = 40.0;
         let vw = ui.get_view_width() as f64;
         let vh = ui.get_view_height() as f64;
@@ -465,6 +667,9 @@ impl App {
     }
 
     fn push_node(&mut self, node: Node) -> usize {
+        self.selected_arrow = None;
+        self.arrow_start = None;
+        self.link_start = None;
         self.nodes_mut().push(node);
         let i = self.nodes().len() - 1;
         self.selected = Some(i);
@@ -478,6 +683,9 @@ impl App {
     /// (e.g. a screen snip) becomes an embedded image node, text becomes a
     /// Typst node.
     fn paste(&mut self, ui: &MainWindow) {
+        self.arrow_start = None;
+        self.link_start = None;
+        ui.set_connect_mode(0);
         let mut clip = match arboard::Clipboard::new() {
             Ok(c) => c,
             Err(e) => {
@@ -564,6 +772,10 @@ impl App {
 
     /// Open the editor appropriate for the node's kind.
     fn open_editor(&mut self, ui: &MainWindow, i: usize) {
+        self.selected_arrow = None;
+        self.arrow_start = None;
+        self.link_start = None;
+        ui.set_connect_mode(0);
         self.selected = Some(i);
         self.update_selection_flags();
         self.drag_orig = None;
@@ -693,11 +905,24 @@ impl App {
     }
 
     fn delete_selected(&mut self) {
+        if let Some(i) = self.selected_arrow.take() {
+            self.link_start = None;
+            if i < self.doc.pages[self.active].arrows.len() {
+                self.snapshot();
+                self.doc.pages[self.active].arrows.remove(i);
+                self.mark_dirty();
+            }
+            return;
+        }
         if let Some(i) = self.selected {
             self.snapshot();
-            self.nodes_mut().remove(i);
+            let id = self.nodes_mut().remove(i).id;
+            self.doc.pages[self.active].arrows.retain(|e| e.from != id && e.to != id);
             self.model.remove(i);
             self.selected = None;
+            self.selected_arrow = None;
+            self.arrow_start = None;
+            self.link_start = None;
             self.mark_dirty();
         }
     }
@@ -728,8 +953,12 @@ impl App {
             }
         }
         self.active = snap.active.min(self.doc.pages.len() - 1);
+        ui.set_connect_mode(0);
         self.apply_view(ui);
         self.selected = None;
+        self.selected_arrow = None;
+        self.arrow_start = None;
+        self.link_start = None;
         self.refresh_all();
         self.refresh_tabs();
         self.mark_dirty();
@@ -739,6 +968,7 @@ impl App {
     /// Spatial navigation: pick the node in the given direction whose center
     /// lies within a 90 degree cone, minimizing along + 2 * across distance.
     fn navigate(&mut self, dx: f64, dy: f64) {
+        self.selected_arrow = None;
         let Some(cur) = self.selected else {
             if !self.nodes().is_empty() {
                 self.selected = Some(0);
@@ -775,6 +1005,73 @@ impl App {
             self.update_selection_flags();
         }
     }
+}
+
+/// Generous 18-pixel radius independent of zoom; prefer valid targets, then
+/// the nearest one. Hover and click use this exact same selection rule.
+fn link_target(candidates: &[(arrows::Point,arrows::Point,bool)], p: arrows::Point, zoom:f64) -> Option<usize> {
+    if !zoom.is_finite() || zoom<=0.0 { return None; }
+    candidates.iter().enumerate().filter_map(|(i,(a,b,eligible))| {
+        let d=arrows::distance(p,&[*a,*b])*zoom;
+        (d<=18.0).then_some((i,*eligible,d))
+    }).min_by(|a,b| b.1.cmp(&a.1).then_with(|| a.2.total_cmp(&b.2))).map(|(i,_,_)| i)
+}
+
+/// Vector paths avoid allocating a huge arrow image when nodes are far apart.
+fn arrow_vm(points: &[arrows::Point], selected: bool, suspended: bool) -> ArrowVm {
+    if points.len() < 2 || points.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
+        return ArrowVm::default();
+    }
+    let min_x = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - 10.0;
+    let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min) - 10.0;
+    let w = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) - min_x + 10.0;
+    let h = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max) - min_y + 10.0;
+    let mut d = String::new();
+    if suspended {
+        for w in points.windows(2) {
+            let dx = w[1].0-w[0].0;
+            let dy = w[1].1-w[0].1;
+            let length = dx.hypot(dy);
+            if length == 0.0 { continue; }
+            // Bound path complexity even for extremely long off-screen runs.
+            let step = 10.0_f64.max(length / 256.0);
+            let mut along = 0.0;
+            while along < length {
+                let end = (along + step * 0.6).min(length);
+                d.push_str(&format!("M {} {} L {} {} ",
+                    w[0].0-min_x+dx*along/length,w[0].1-min_y+dy*along/length,
+                    w[0].0-min_x+dx*end/length,w[0].1-min_y+dy*end/length));
+                along += step;
+            }
+        }
+    } else {
+        for (j,p) in points.iter().enumerate() {
+            d.push_str(&format!("{} {} {} ",if j==0 {"M"} else {"L"},p.0-min_x,p.1-min_y));
+        }
+    }
+    let end = points[points.len() - 1];
+    let before = points
+        .iter()
+        .rev()
+        .find(|q| **q != end)
+        .copied()
+        .unwrap_or((end.0 - 1.0, end.1));
+    let angle = (end.1 - before.1).atan2(end.0 - before.0);
+    for offset in [-0.5_f64, 0.5] {
+        let a = angle + offset;
+        d.push_str(&format!(
+            "M {} {} L {} {} ",
+            end.0 - min_x - 10.0 * a.cos(),
+            end.1 - min_y - 10.0 * a.sin(),
+            end.0 - min_x,
+            end.1 - min_y
+        ));
+    }
+    let color = if selected { slint::Color::from_rgb_u8(37,99,235) }
+        else if suspended { slint::Color::from_rgb_u8(180,83,9) }
+        else { slint::Color::from_rgb_u8(82,82,91) };
+    ArrowVm { x:min_x as f32,y:min_y as f32,w:w as f32,h:h as f32,commands:d.into(),color }
+
 }
 
 /// Update a model in place when the row count matches, otherwise replace it.
@@ -819,6 +1116,9 @@ fn status(app: &App, ui: &MainWindow) {
         left.push_str("    ");
         left.push_str(&app.message);
     }
+    if app.blocked_links.get() > 0 {
+        left.push_str("    Linked middles paused; intent saved and will retry when the layout allows");
+    }
     ui.set_status_left(left.into());
     ui.set_status_right(
         format!(
@@ -847,6 +1147,10 @@ fn main() {
     let ui = MainWindow::new().unwrap();
     let model = Rc::new(VecModel::<NodeVm>::default());
     ui.set_nodes(model.clone().into());
+    let arrow_model = Rc::new(VecModel::<ArrowVm>::default());
+    ui.set_arrows(arrow_model.clone().into());
+    let link_model = Rc::new(VecModel::<LinkSegmentVm>::default());
+    ui.set_link_segments(link_model.clone().into());
     let cell_model = Rc::new(VecModel::<CellVm>::default());
     ui.set_edit_cells(cell_model.clone().into());
     let edge_model = Rc::new(VecModel::<ColEdge>::default());
@@ -863,6 +1167,13 @@ fn main() {
         undo: Vec::new(),
         redo: Vec::new(),
         selected: None,
+        selected_arrow: None,
+        arrow_start: None,
+        link_start: None,
+        link_model,
+        blocked_links: Cell::new(0),
+        arrow_model,
+        arrow_cache: RefCell::new(None),
         drag_orig: None,
         resize_orig: None,
         message: String::new(),
@@ -891,15 +1202,69 @@ fn main() {
                 let $u = weak.unwrap();
                 let mut $a = app.borrow_mut();
                 let r = (|| $body)();
+                $a.refresh_arrows();
+                $a.refresh_link_ui(&$u);
                 status(&$a, &$u);
                 r
             });
         }};
     }
 
-    hook!(on_node_pressed, |a, _u, i| {
+    // Hover only reads the candidate model, avoiding routing on every pointer move.
+    {
+        let app=app.clone(); let weak=ui.as_weak();
+        ui.on_link_pointer(move |x,y,inside| {
+            let Some(ui)=weak.upgrade() else { return; };
+            let a=app.borrow();
+            let hit=if inside { a.link_segment_at(&ui,x as f64,y as f64) } else { None };
+            ui.set_link_hover(hit.map(|i| i as i32).unwrap_or(-1));
+            ui.set_link_hint(hit.and_then(|i| a.link_model.row_data(i)).map(|s| s.reason)
+                .unwrap_or_else(|| "Move near a highlighted middle segment".into()));
+        });
+    }
+
+    hook!(on_port_clicked, |a, u, i, side| {
+        let Some(node) = a.nodes().get(i as usize) else { return; };
+        let id = node.id.clone();
+        let side = match side {
+            0 => Side::North,
+            1 => Side::East,
+            2 => Side::South,
+            _ => Side::West,
+        };
+        if let Some((from, from_side)) = a.arrow_start.clone() {
+            if from == id { a.message = "Choose a different destination node".into(); return; }
+            a.snapshot();
+            let active = a.active;
+            a.doc.pages[active].arrows.push(Arrow {
+                id: doc::new_id(), from, from_side, to: id, to_side: side, trunk: None,
+                routing: if u.get_connect_mode() == 2 { Routing::Orthogonal } else { Routing::Straight },
+            });
+            a.arrow_start = None;
+            a.link_start = None;
+            a.selected = None;
+            a.selected_arrow = Some(a.doc.pages[active].arrows.len() - 1);
+            a.update_selection_flags();
+            a.mark_dirty();
+            u.set_connect_mode(0);
+            a.message = "Arrow added; Delete removes it, arrow tools change its routing".into();
+        } else {
+            a.arrow_start = Some((id, side));
+            a.selected_arrow = None;
+            a.selected = Some(i as usize);
+            a.update_selection_flags();
+            a.message = "Click a destination attachment point (Esc cancels)".into();
+        }
+    });
+
+    hook!(on_node_pressed, |a, u, i| {
+        if u.get_connect_mode() == 3 {
+            a.link_start = None;
+            u.set_connect_mode(0);
+        }
         let i = i as usize;
         a.selected = Some(i);
+        a.selected_arrow = None;
         a.update_selection_flags();
         a.drag_orig = Some((a.nodes()[i].x, a.nodes()[i].y));
         a.message.clear();
@@ -1003,6 +1368,7 @@ fn main() {
                 a.copy_to_clipboard(text);
             }
             "delete" => {
+                a.selected_arrow = None;
                 a.selected = Some(i);
                 a.delete_selected();
             }
@@ -1053,13 +1419,24 @@ fn main() {
         u.invoke_focus_canvas();
     });
 
-    hook!(on_background_clicked, |a, _u| {
+    hook!(on_background_clicked, |a, u, x, y| {
+        if u.get_connect_mode() == 3 {
+            a.link_middle_clicked(&u, x as f64, y as f64);
+            return;
+        }
+        a.selected_arrow = a.arrow_routes().iter().rev()
+            .find(|(_, r)| arrows::distance((x as f64, y as f64), &r.points) <= 7.0 / u.get_zoom() as f64)
+            .map(|(i, _)| *i);
+        a.arrow_start = None;
+        a.link_start = None;
+        u.set_connect_mode(0);
         a.selected = None;
         a.update_selection_flags();
         a.message.clear();
     });
 
     hook!(on_background_double_clicked, |a, u, x, y| {
+        u.set_connect_mode(0);
         let i = a.add_node(x as f64, y as f64);
         u.invoke_begin_edit(i as i32, SharedString::default());
     });
@@ -1123,6 +1500,10 @@ fn main() {
         } else if is(Key::DownArrow) {
             a.navigate(0.0, 1.0);
         } else if is(Key::Escape) {
+            a.arrow_start = None;
+            a.link_start = None;
+            a.selected_arrow = None;
+            u.set_connect_mode(0);
             a.selected = None;
             a.update_selection_flags();
             a.message.clear();
@@ -1154,6 +1535,52 @@ fn main() {
             u.invoke_zoom_at(f, u.get_view_width() / 2.0, u.get_view_height() / 2.0);
         };
         match name.as_str() {
+            "cancel-link" if !editing => {
+                a.link_start=None;
+                u.set_connect_mode(0);
+                a.message.clear();
+            }
+            "restart-link" if !editing => {
+                a.link_start=None;
+                a.selected_arrow=None;
+                a.message="Choose the first middle segment".into();
+            }
+            "link-middles" if !editing => {
+                a.arrow_start = None;
+                a.link_start = None;
+                u.set_connect_mode(3);
+                a.message = "Click the first orthogonal middle segment (Esc cancels)".into();
+            }
+            "unlink-middles" if !editing => {
+                a.link_start = None;
+                u.set_connect_mode(0);
+                if let Some(i) = a.selected_arrow {
+                    if a.doc.pages[a.active].arrows[i].trunk.is_some() {
+                        a.snapshot();
+                        a.clear_link(i);
+                        a.mark_dirty();
+                        a.message = "Manual link removed; automatic alignment still applies".into();
+                    }
+                }
+            }
+            "arrow-straight" | "arrow-orthogonal" if !editing => {
+                a.link_start = None;
+                if u.get_connect_mode() == 3 { u.set_connect_mode(0); }
+                let style = if name == "arrow-straight" { Routing::Straight } else { Routing::Orthogonal };
+                if let Some(i) = a.selected_arrow {
+                    if a.doc.pages[a.active].arrows[i].routing != style {
+                        a.snapshot();
+                        let active = a.active;
+                        a.doc.pages[active].arrows[i].routing = style;
+                        a.mark_dirty();
+                    }
+                } else {
+                    a.arrow_start = None;
+                    a.link_start = None;
+                    u.set_connect_mode(if style == Routing::Straight { 1 } else { 2 });
+                    a.message = "Click a source attachment point, then a destination (Esc cancels)".into();
+                }
+            }
             "new" => {
                 end_edits(&mut a, &u);
                 if a.confirm_discard(&u) {
@@ -1190,6 +1617,7 @@ fn main() {
             "undo" if !editing => a.undo(&u),
             "redo" if !editing => a.redo(&u),
             "add-node" if !editing => {
+                u.set_connect_mode(0);
                 let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
                 let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();
                 let i = a.add_node(x as f64 - DEFAULT_WIDTH / 2.0, y as f64);
@@ -1267,4 +1695,33 @@ fn main() {
 
     ui.invoke_focus_canvas();
     ui.run().unwrap();
+}
+
+#[cfg(test)]
+mod arrow_display_tests {
+    use super::*;
+
+    #[test]
+    fn linking_targets_are_generous_zoom_independent_and_prefer_valid_segments() {
+        let targets=[((0.0,0.0),(100.0,0.0),true),((0.0,10.0),(100.0,10.0),false)];
+        assert_eq!(link_target(&targets,(50.0,10.0),1.0),Some(0));
+        assert_eq!(link_target(&targets,(50.0,-18.0),1.0),Some(0));
+        assert_eq!(link_target(&targets,(50.0,-19.0),1.0),None);
+        assert_eq!(link_target(&targets,(50.0,-180.0),0.1),Some(0));
+        assert_eq!(link_target(&targets,(50.0,-9.0),2.0),Some(0));
+        assert_eq!(link_target(&targets,(50.0,24.0),1.0),Some(1));
+        assert_eq!(link_target(&targets,(0.0,0.0),0.0),None);
+        assert_eq!(link_target(&[],(0.0,0.0),1.0),None);
+    }
+
+    #[test]
+    fn empty_invalid_and_extreme_arrow_display_is_bounded() {
+        assert!(arrow_vm(&[],false,false).commands.is_empty());
+        assert!(arrow_vm(&[(0.0,0.0)],false,false).commands.is_empty());
+        assert!(arrow_vm(&[(f64::NAN,0.0),(0.0,0.0)],false,false).commands.is_empty());
+        let vm=arrow_vm(&[(-1_000_000.0,0.0),(1_000_000.0,0.0)],false,true);
+        assert!(vm.w.is_finite() && vm.h.is_finite());
+        assert!(vm.commands.len()<40_000);
+        assert!(vm.commands.matches('M').count()<=258);
+    }
 }

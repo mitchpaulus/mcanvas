@@ -78,6 +78,14 @@
             "$ref": "#/$defs/node"
           },
           "default": []
+        },
+        "arrows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/arrow"
+          },
+          "default": [],
+          "description": "Directed connections between nodes on this page."
         }
       },
       "additionalProperties": true
@@ -377,6 +385,91 @@
         }
       },
       "additionalProperties": true
+    },
+    "arrow": {
+      "type": "object",
+      "required": [
+        "id",
+        "from",
+        "from_side",
+        "to",
+        "to_side"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from_side": {
+          "enum": [
+            "north",
+            "east",
+            "south",
+            "west"
+          ]
+        },
+        "to_side": {
+          "enum": [
+            "north",
+            "east",
+            "south",
+            "west"
+          ]
+        },
+        "routing": {
+          "enum": [
+            "straight",
+            "orthogonal"
+          ],
+          "default": "straight"
+        },
+        "trunk": {
+          "$ref": "#/$defs/trunk",
+          "description": "Saved manual linking intent. Matching ids identify linked arrows on this page. Geometry is recomputed; infeasible groups pause without discarding intent."
+        }
+      },
+      "additionalProperties": true
+    },
+    "trunk": {
+      "type": "object",
+      "required": [
+        "id",
+        "vertical",
+        "coordinate",
+        "start",
+        "end"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vertical": {
+          "type": "boolean"
+        },
+        "coordinate": {
+          "type": "number",
+          "description": "Shared x for vertical segments, y for horizontal segments."
+        },
+        "start": {
+          "type": "number",
+          "description": "Lower coordinate along the shared segment."
+        },
+        "end": {
+          "type": "number",
+          "description": "Upper coordinate along the shared segment; must exceed start."
+        }
+      },
+      "additionalProperties": true,
+      "description": "Initial selected segment and shared group identity. The initial coordinates are retained for file compatibility; current shared geometry may move."
     }
   }
 }
