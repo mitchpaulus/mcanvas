@@ -102,6 +102,8 @@ export component MainWindow inherits Window {
     in-out property <length> pan-x: 0;
     in-out property <length> pan-y: 0;
     in-out property <float> zoom: 1.0;
+    // Space is held on the canvas: dragging anywhere pans.
+    in-out property <bool> space-pan;
     in-out property <int> edit-index: -1;
     in-out property <[CellVm]> edit-cells;
     in-out property <int> table-edit-index: -1;
@@ -282,7 +284,23 @@ export component MainWindow inherits Window {
             clip: true;
 
             keys := FocusScope {
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.space-pan = false;
+                    }
+                }
+                key-released(e) => {
+                    if (e.text == " ") {
+                        root.space-pan = false;
+                        return accept;
+                    }
+                    reject
+                }
                 key-pressed(e) => {
+                    if (e.text == " ") {
+                        root.space-pan = true;
+                        return accept;
+                    }
                     if (e.text == Key.Escape && bg.drag-mode == 2) {
                         bg.drag-mode = 3;
                         root.marquee-cancel();
@@ -328,7 +346,10 @@ export component MainWindow inherits Window {
                             self.has-hover && !self.pressed);
                     }
                     pointer-event(e) => {
-                        if (e.kind == PointerEventKind.down) {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                            root.command("zoom-fit");
+                        }
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
                             self.start-pan-x = root.pan-x;
                             self.start-pan-y = root.pan-y;
                             self.drag-mode = e.modifiers.shift ? 1 : 0;
@@ -336,7 +357,7 @@ export component MainWindow inherits Window {
                             self.m-y0 = (self.mouse-y - root.pan-y) / root.zoom;
                             keys.focus();
                         }
-                        if (e.kind == PointerEventKind.up && self.drag-mode == 2) {
+                        if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left && self.drag-mode == 2) {
                             root.marquee-end(self.m-x0, self.m-y0, self.m-x1, self.m-y1, e.modifiers.control);
                         }
                     }
@@ -456,6 +477,12 @@ export component MainWindow inherits Window {
                         property <length> start-x;
                         property <length> start-y;
                         pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                root.command("zoom-fit");
+                            }
+                            if (e.button != PointerEventButton.left) {
+                                return;
+                            }
                             if (e.kind == PointerEventKind.down) {
                                 self.start-x = node.x + self.mouse-x;
                                 self.start-y = node.y + self.mouse-y;
@@ -495,6 +522,12 @@ export component MainWindow inherits Window {
                         height: 12px;
                         mouse-cursor: ew-resize;
                         pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                root.command("zoom-fit");
+                            }
+                            if (e.button != PointerEventButton.left) {
+                                return;
+                            }
                             if (e.kind == PointerEventKind.down) {
                                 self.start-x = node.x + self.x + self.mouse-x;
                             }
@@ -531,6 +564,11 @@ export component MainWindow inherits Window {
                         border-color: #2563eb;
                         port := TouchArea {
                             mouse-cursor: crosshair;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                    root.command("zoom-fit");
+                                }
+                            }
                             clicked => { root.port-clicked(i, side); keys.focus(); }
                         }
                     }
@@ -580,6 +618,11 @@ export component MainWindow inherits Window {
                     }
                     link-area := TouchArea {
                         mouse-cursor: root.link-hover >= 0 && root.link-segments[root.link-hover].eligible ? pointer : not-allowed;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                root.command("zoom-fit");
+                            }
+                        }
                         changed mouse-x => {
                             root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
                         }
@@ -637,6 +680,28 @@ export component MainWindow inherits Window {
                             background: #dbeafe; border-radius: 4px;
                             Text { text: "Cancel"; horizontal-alignment: center; vertical-alignment: center; }
                             TouchArea { mouse-cursor: pointer; clicked => { root.command("cancel-link"); } }
+                        }
+                    }
+                }
+
+                // Space held: drag anywhere to pan, even over nodes and arrows.
+                if root.space-pan : TouchArea {
+                    property <length> start-pan-x;
+                    property <length> start-pan-y;
+                    mouse-cursor: self.pressed ? grabbing : grab;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                            root.command("zoom-fit");
+                        }
+                        if (e.kind == PointerEventKind.down) {
+                            self.start-pan-x = root.pan-x;
+                            self.start-pan-y = root.pan-y;
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                            root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
                         }
                     }
                 }

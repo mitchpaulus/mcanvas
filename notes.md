@@ -158,6 +158,9 @@ Working:
   with the source line number.
 - Pan (drag background or wheel), zoom (Ctrl+wheel, Ctrl+plus/minus/0, Home
   resets), node drag with grid snap on drop, width resize via bottom-right handle.
+- Hold Space and drag anywhere to pan, even starting on a node or arrow (grab
+  cursor; only while the canvas has focus, so Space still types in editors).
+  Middle-click anywhere on the canvas zooms to fit, like Ctrl+F.
 - Edit mode: double-click or Enter opens a raw-source box; Ctrl+Enter commits,
   Esc cancels (an empty new node is discarded on cancel).
 - Ctrl+Shift+N or double-click empty space creates a node. Delete removes the selection.
