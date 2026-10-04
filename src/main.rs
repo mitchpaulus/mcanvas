@@ -76,6 +76,37 @@ const TABLE_EDITOR_MIN_WIDTH: f64 = 480.0;
 /// Minimum width of a flexible column in the grid editor, in canvas units.
 const TABLE_EDITOR_MIN_COL: f64 = 48.0;
 
+/// File holding the folder of the last opened or saved canvas, so file dialogs
+/// start there on the next launch.
+fn last_dir_file() -> Option<PathBuf> {
+    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        var("LOCALAPPDATA")?
+    } else {
+        var("XDG_STATE_HOME").or_else(|| var("HOME").map(|h| h.join(".local/state")))?
+    };
+    Some(base.join("mcanvas").join("last_dir"))
+}
+
+fn last_dir() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::fs::read_to_string(last_dir_file()?).ok()?.trim_end());
+    dir.is_dir().then_some(dir)
+}
+
+/// Best effort: failing to record the folder never affects opening or saving.
+fn remember_dir(path: &std::path::Path) {
+    let (Some(file), Some(dir)) = (
+        last_dir_file(),
+        std::path::absolute(path).ok().and_then(|p| p.parent().map(|d| d.to_path_buf())),
+    ) else {
+        return;
+    };
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(file, dir.to_string_lossy().as_bytes());
+}
+
 impl App {
     fn arrow_routes(&self) -> Vec<(usize, arrows::Route)> {
         let rect = |id: &str| {
@@ -235,6 +266,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .filter(|d| !d.as_os_str().is_empty())
+            .or_else(last_dir)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
@@ -378,6 +410,7 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("untitled.mc"));
         self.doc.page = self.doc.pages[self.active].id.clone();
         self.doc.save(&path)?;
+        remember_dir(&path);
         self.path = Some(path);
         self.dirty = false;
         self.dirty_since = None;
@@ -390,6 +423,9 @@ impl App {
         self.doc = doc;
         ui.set_connect_mode(0);
         self.apply_view(ui);
+        if let Some(p) = &path {
+            remember_dir(p);
+        }
         self.path = path;
         self.dirty = false;
         self.dirty_since = None;
@@ -1135,7 +1171,10 @@ fn main() {
     let path = std::env::args().nth(1).map(PathBuf::from);
     let doc = match &path {
         Some(p) if p.exists() => match Canvas::load(p) {
-            Ok(d) => d,
+            Ok(d) => {
+                remember_dir(p);
+                d
+            }
             Err(e) => {
                 eprintln!("failed to load {}: {e}", p.display());
                 std::process::exit(1);
