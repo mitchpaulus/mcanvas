@@ -207,6 +207,11 @@ destination node. Escape or clicking the background cancels creation.
 Click an arrow to select it; Delete removes it, and either arrow tool changes
 its routing. Click empty canvas before creating another arrow.
 
+The pointer shows what a click will hit. An arrow within 10 screen pixels
+(independent of zoom) gets a blue halo and a pointer cursor; when several are
+in range, the nearest wins, and hover and click use the same rule. Nodes and
+their resize handles highlight under the pointer.
+
 Arrows follow node movement, resizing, and content height changes. They belong
 to a page, are saved in its `arrows` array, and participate in undo/redo. Removing
 a node also removes its arrows. Duplicating a page remaps its connections.

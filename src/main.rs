@@ -48,6 +48,11 @@ struct App {
     blocked_links: Cell<usize>,
     arrow_model: Rc<VecModel<ArrowVm>>,
     arrow_cache: RefCell<Option<ArrowCacheKey>>,
+    /// Arrow index and route of each `arrow_model` row, for hit testing
+    /// without rerouting on every pointer move.
+    arrow_rows: RefCell<Vec<(usize, Vec<arrows::Point>)>>,
+    /// `arrow_model` row under the pointer.
+    hover_row: Cell<Option<usize>>,
     drag_orig: Option<(f64, f64)>,
     resize_orig: Option<f64>,
     message: String,
@@ -75,6 +80,8 @@ struct Snapshot {
 const TABLE_EDITOR_MIN_WIDTH: f64 = 480.0;
 /// Minimum width of a flexible column in the grid editor, in canvas units.
 const TABLE_EDITOR_MIN_COL: f64 = 48.0;
+/// Distance in screen pixels within which hovering or clicking hits an arrow.
+const ARROW_HIT_RADIUS: f64 = 10.0;
 
 /// File holding the folder of the last opened or saved canvas, so file dialogs
 /// start there on the next launch.
@@ -156,10 +163,42 @@ impl App {
             .filter_map(|(_,e)| e.trunk.as_ref().map(|t| &t.id)).collect();
         self.blocked_links.set(suspended.len());
         let rows: Vec<ArrowVm> = routes
-            .into_iter()
-            .map(|(i, route)| arrow_vm(&route.points, self.selected_arrow == Some(i), route.suspended))
+            .iter()
+            .map(|(i, route)| arrow_vm(&route.points, self.selected_arrow == Some(*i), route.suspended))
             .collect();
         self.arrow_model.set_vec(rows);
+        *self.arrow_rows.borrow_mut() =
+            routes.into_iter().map(|(i, r)| (i, r.points)).collect();
+        self.hover_row.set(None);
+    }
+
+    /// Row of the arrow a background click at canvas point `p` would select:
+    /// the nearest within ARROW_HIT_RADIUS screen pixels, topmost on ties.
+    fn arrow_row_at(&self, p: arrows::Point, zoom: f64) -> Option<usize> {
+        if !zoom.is_finite() || zoom <= 0.0 {
+            return None;
+        }
+        self.arrow_rows
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(row, (_, points))| (row, arrows::distance(p, points) * zoom))
+            .filter(|(_, d)| *d <= ARROW_HIT_RADIUS)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            .map(|(row, _)| row)
+    }
+
+    fn set_arrow_hover(&self, row: Option<usize>) {
+        let old = self.hover_row.replace(row);
+        if old == row {
+            return;
+        }
+        for (r, hovered) in [(old, false), (row, true)] {
+            if let Some(mut vm) = r.and_then(|r| self.arrow_model.row_data(r)) {
+                vm.hovered = hovered;
+                self.arrow_model.set_row_data(r.unwrap(), vm);
+            }
+        }
     }
 
     fn clear_link(&mut self, i: usize) {
@@ -1106,7 +1145,7 @@ fn arrow_vm(points: &[arrows::Point], selected: bool, suspended: bool) -> ArrowV
     let color = if selected { slint::Color::from_rgb_u8(37,99,235) }
         else if suspended { slint::Color::from_rgb_u8(180,83,9) }
         else { slint::Color::from_rgb_u8(82,82,91) };
-    ArrowVm { x:min_x as f32,y:min_y as f32,w:w as f32,h:h as f32,commands:d.into(),color }
+    ArrowVm { x:min_x as f32,y:min_y as f32,w:w as f32,h:h as f32,commands:d.into(),color,hovered:false }
 
 }
 
@@ -1213,6 +1252,8 @@ fn main() {
         blocked_links: Cell::new(0),
         arrow_model,
         arrow_cache: RefCell::new(None),
+        arrow_rows: RefCell::new(Vec::new()),
+        hover_row: Cell::new(None),
         drag_orig: None,
         resize_orig: None,
         message: String::new(),
@@ -1259,6 +1300,24 @@ fn main() {
             ui.set_link_hover(hit.map(|i| i as i32).unwrap_or(-1));
             ui.set_link_hint(hit.and_then(|i| a.link_model.row_data(i)).map(|s| s.reason)
                 .unwrap_or_else(|| "Move near a highlighted middle segment".into()));
+        });
+    }
+
+    // Show which arrow a background click would select. Returns whether one
+    // is under the pointer so the canvas can show a pointer cursor.
+    {
+        let app = app.clone();
+        let weak = ui.as_weak();
+        ui.on_canvas_pointer(move |x, y, inside| {
+            let Some(ui) = weak.upgrade() else { return false; };
+            let a = app.borrow();
+            let row = if inside {
+                a.arrow_row_at((x as f64, y as f64), ui.get_zoom() as f64)
+            } else {
+                None
+            };
+            a.set_arrow_hover(row);
+            row.is_some()
         });
     }
 
@@ -1463,9 +1522,9 @@ fn main() {
             a.link_middle_clicked(&u, x as f64, y as f64);
             return;
         }
-        a.selected_arrow = a.arrow_routes().iter().rev()
-            .find(|(_, r)| arrows::distance((x as f64, y as f64), &r.points) <= 7.0 / u.get_zoom() as f64)
-            .map(|(i, _)| *i);
+        a.selected_arrow = a
+            .arrow_row_at((x as f64, y as f64), u.get_zoom() as f64)
+            .map(|row| a.arrow_rows.borrow()[row].0);
         a.arrow_start = None;
         a.link_start = None;
         u.set_connect_mode(0);

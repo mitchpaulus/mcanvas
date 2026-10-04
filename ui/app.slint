@@ -11,6 +11,7 @@ export struct ArrowVm {
     h: length,
     commands: string,
     color: color,
+    hovered: bool,
 }
 
 export struct NodeVm {
@@ -123,6 +124,9 @@ export component MainWindow inherits Window {
     // Node context menu: "edit", "copy-typst", "delete".
     callback node-menu(string, int);
     callback background-clicked(length, length);
+    // Canvas-coordinate pointer position over the background; returns whether
+    // a click there would select an arrow.
+    callback canvas-pointer(length, length, bool) -> bool;
     callback background-double-clicked(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
@@ -292,6 +296,18 @@ export component MainWindow inherits Window {
                 bg := TouchArea {
                     property <length> start-pan-x;
                     property <length> start-pan-y;
+                    property <bool> over-arrow;
+                    mouse-cursor: self.over-arrow ? pointer : default;
+                    changed mouse-x => { self.hover(); }
+                    changed mouse-y => { self.hover(); }
+                    changed has-hover => { self.hover(); }
+                    changed pressed => { self.hover(); }
+                    function hover() {
+                        self.over-arrow = root.canvas-pointer(
+                            (self.mouse-x - root.pan-x) / root.zoom,
+                            (self.mouse-y - root.pan-y) / root.zoom,
+                            self.has-hover && !self.pressed);
+                    }
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down) {
                             self.start-pan-x = root.pan-x;
@@ -330,19 +346,37 @@ export component MainWindow inherits Window {
 
                 // Path reserves half its stroke on each side. Compensate so
                 // its viewbox maps exactly to canvas coordinates.
-                for arrow in root.arrows : Path {
-                    x: root.pan-x + (arrow.x - 1px) * root.zoom;
-                    y: root.pan-y + (arrow.y - 1px) * root.zoom;
-                    width: (arrow.w + 2px) * root.zoom;
-                    height: (arrow.h + 2px) * root.zoom;
-                    commands: arrow.commands;
-                    viewbox-width: arrow.w / 1px;
-                    viewbox-height: arrow.h / 1px;
-                    fill: transparent;
-                    stroke: arrow.color;
-                    stroke-width: 2px * root.zoom;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
+                for arrow in root.arrows : Rectangle {
+                    // Hover halo: a fixed screen width, so it stays visible
+                    // when zoomed out.
+                    if arrow.hovered : Path {
+                        x: root.pan-x + arrow.x * root.zoom - 5px;
+                        y: root.pan-y + arrow.y * root.zoom - 5px;
+                        width: arrow.w * root.zoom + 10px;
+                        height: arrow.h * root.zoom + 10px;
+                        commands: arrow.commands;
+                        viewbox-width: arrow.w / 1px;
+                        viewbox-height: arrow.h / 1px;
+                        fill: transparent;
+                        stroke: #3b82f650;
+                        stroke-width: 10px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                    }
+                    Path {
+                        x: root.pan-x + (arrow.x - 1px) * root.zoom;
+                        y: root.pan-y + (arrow.y - 1px) * root.zoom;
+                        width: (arrow.w + 2px) * root.zoom;
+                        height: (arrow.h + 2px) * root.zoom;
+                        commands: arrow.commands;
+                        viewbox-width: arrow.w / 1px;
+                        viewbox-height: arrow.h / 1px;
+                        fill: transparent;
+                        stroke: arrow.color;
+                        stroke-width: 2px * root.zoom;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                    }
                 }
 
                 // Node geometry is snapped to whole physical pixels. The SVG
@@ -354,8 +388,8 @@ export component MainWindow inherits Window {
                     width: round(n.w * root.zoom / 1phx) * 1phx;
                     height: round(n.h * root.zoom / 1phx) * 1phx;
                     background: white;
-                    border-width: n.selected ? 2px : 1px;
-                    border-color: n.selected ? #3b82f6 : #c8c8c8;
+                    border-width: n.selected || body.has-hover || handle.has-hover ? 2px : 1px;
+                    border-color: n.selected ? #3b82f6 : body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
                     border-radius: 3px;
                     clip: true;
 
@@ -378,7 +412,7 @@ export component MainWindow inherits Window {
                     // (node.x + local mouse-x), not in this TouchArea's own
                     // coordinates, because the TouchArea moves with the node
                     // while dragging, which would feed back into the delta.
-                    TouchArea {
+                    body := TouchArea {
                         property <length> start-x;
                         property <length> start-y;
                         pointer-event(e) => {
@@ -435,7 +469,7 @@ export component MainWindow inherits Window {
                         }
                         Rectangle {
                             x: 4px; y: 4px; width: 6px; height: 6px;
-                            background: n.selected ? #3b82f6 : #bbbbbb;
+                            background: n.selected || handle.has-hover ? #3b82f6 : #bbbbbb;
                         }
                     }
                 }
