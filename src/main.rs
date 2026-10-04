@@ -53,7 +53,14 @@ struct App {
     arrow_rows: RefCell<Vec<(usize, Vec<arrows::Point>)>>,
     /// `arrow_model` row under the pointer.
     hover_row: Cell<Option<usize>>,
-    drag_orig: Option<(f64, f64)>,
+    /// Selected nodes besides `selected`, added with Ctrl+click. `select`
+    /// clears them, so every plain selection change drops the group.
+    also_selected: Vec<usize>,
+    /// Node pressed inside a multi-selection: a click without a drag selects
+    /// only that node on release, while a drag moves the whole group.
+    collapse_on_release: Option<usize>,
+    /// Pre-drag positions of every node being dragged, the pressed one first.
+    drag_orig: Vec<(usize, f64, f64)>,
     resize_orig: Option<f64>,
     message: String,
     renderer: Renderer,
@@ -293,7 +300,7 @@ impl App {
         } else {
             self.link_start = Some((self.doc.pages[self.active].arrows[i].id.clone(), k));
             self.selected_arrow = Some(i);
-            self.selected = None;
+            self.select(None);
             self.update_selection_flags();
             self.message =
                 "Click a parallel middle segment on the other arrow (Esc cancels)".into();
@@ -327,7 +334,8 @@ impl App {
             h: node.height.unwrap_or(40.0) as f32,
             img: Default::default(),
             error: SharedString::default(),
-            selected: self.selected == Some(i),
+            selected: self.is_selected(i),
+            marquee: false,
         };
         match node.kind.as_str() {
             "image" => {
@@ -415,10 +423,85 @@ impl App {
         replace_rows(&self.tab_model, tabs);
     }
 
+    /// Make `i` the only selected node, or clear the node selection.
+    fn select(&mut self, i: Option<usize>) {
+        self.selected = i;
+        self.also_selected.clear();
+        self.collapse_on_release = None;
+    }
+
+    fn is_selected(&self, i: usize) -> bool {
+        self.selected == Some(i) || self.also_selected.contains(&i)
+    }
+
+    /// Selected nodes, primary first.
+    fn selection(&self) -> Vec<usize> {
+        self.selected.into_iter().chain(self.also_selected.iter().copied()).collect()
+    }
+
+    /// Make `i` the primary node (the one Enter and arrow keys act on),
+    /// keeping the rest of the selection.
+    fn make_primary(&mut self, i: usize) {
+        if self.selected == Some(i) {
+            return;
+        }
+        self.also_selected.retain(|&j| j != i);
+        self.also_selected.extend(self.selected.replace(i));
+    }
+
+    fn deselect(&mut self, i: usize) {
+        if self.selected == Some(i) {
+            self.selected = self.also_selected.pop();
+        } else {
+            self.also_selected.retain(|&j| j != i);
+        }
+    }
+
+    /// Nodes a selection rectangle from (x0, y0) to (x1, y1) selects. Dragged
+    /// rightwards it takes nodes fully inside; leftwards, any node it touches.
+    fn marquee_hits(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<usize> {
+        let (l, r, t, b) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+        let crossing = x1 < x0;
+        self.model
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                if crossing {
+                    n.x < r && n.x + n.w > l && n.y < b && n.y + n.h > t
+                } else {
+                    n.x >= l && n.x + n.w <= r && n.y >= t && n.y + n.h <= b
+                }
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn set_marquee_preview(&self, hits: &[usize]) {
+        for i in 0..self.model.row_count() {
+            if let Some(mut vm) = self.model.row_data(i) {
+                let want = hits.contains(&i);
+                if vm.marquee != want {
+                    vm.marquee = want;
+                    self.model.set_row_data(i, vm);
+                }
+            }
+        }
+    }
+
+    fn set_node_pos(&mut self, i: usize, x: f64, y: f64) {
+        self.nodes_mut()[i].x = x;
+        self.nodes_mut()[i].y = y;
+        if let Some(mut vm) = self.model.row_data(i) {
+            vm.x = x as f32;
+            vm.y = y as f32;
+            self.model.set_row_data(i, vm);
+        }
+    }
+
     fn update_selection_flags(&self) {
         for i in 0..self.model.row_count() {
             if let Some(mut vm) = self.model.row_data(i) {
-                let want = self.selected == Some(i);
+                let want = self.is_selected(i);
                 if vm.selected != want {
                     vm.selected = want;
                     self.model.set_row_data(i, vm);
@@ -470,11 +553,11 @@ impl App {
         self.dirty_since = None;
         self.undo.clear();
         self.redo.clear();
-        self.selected = None;
+        self.select(None);
         self.selected_arrow = None;
         self.arrow_start = None;
         self.link_start = None;
-        self.drag_orig = None;
+        self.drag_orig.clear();
         self.resize_orig = None;
         self.message.clear();
         self.refresh_all();
@@ -507,11 +590,11 @@ impl App {
             self.active = i;
             ui.set_connect_mode(0);
             self.apply_view(ui);
-            self.selected = None;
+            self.select(None);
             self.selected_arrow = None;
             self.arrow_start = None;
             self.link_start = None;
-            self.drag_orig = None;
+            self.drag_orig.clear();
             self.resize_orig = None;
             self.refresh_all();
         }
@@ -599,7 +682,7 @@ impl App {
                 if was_active {
                     ui.set_connect_mode(0);
                     self.apply_view(ui);
-                    self.selected = None;
+                    self.select(None);
                     self.selected_arrow = None;
                     self.arrow_start = None;
                     self.link_start = None;
@@ -747,7 +830,7 @@ impl App {
         self.link_start = None;
         self.nodes_mut().push(node);
         let i = self.nodes().len() - 1;
-        self.selected = Some(i);
+        self.select(Some(i));
         self.model.push(self.build_vm(i));
         self.update_selection_flags();
         self.mark_dirty();
@@ -851,9 +934,9 @@ impl App {
         self.arrow_start = None;
         self.link_start = None;
         ui.set_connect_mode(0);
-        self.selected = Some(i);
+        self.select(Some(i));
         self.update_selection_flags();
-        self.drag_orig = None;
+        self.drag_orig.clear();
         let node = &self.nodes()[i];
         if node.kind == "table" {
             self.edit_table = Some(node.table.clone().unwrap_or_else(Table::starter));
@@ -989,12 +1072,17 @@ impl App {
             }
             return;
         }
-        if let Some(i) = self.selected {
+        let mut doomed = self.selection();
+        if !doomed.is_empty() {
             self.snapshot();
-            let id = self.nodes_mut().remove(i).id;
-            self.doc.pages[self.active].arrows.retain(|e| e.from != id && e.to != id);
-            self.model.remove(i);
-            self.selected = None;
+            // Highest index first so the remaining indices stay valid.
+            doomed.sort_unstable_by(|a, b| b.cmp(a));
+            for i in doomed {
+                let id = self.nodes_mut().remove(i).id;
+                self.doc.pages[self.active].arrows.retain(|e| e.from != id && e.to != id);
+                self.model.remove(i);
+            }
+            self.select(None);
             self.selected_arrow = None;
             self.arrow_start = None;
             self.link_start = None;
@@ -1030,7 +1118,7 @@ impl App {
         self.active = snap.active.min(self.doc.pages.len() - 1);
         ui.set_connect_mode(0);
         self.apply_view(ui);
-        self.selected = None;
+        self.select(None);
         self.selected_arrow = None;
         self.arrow_start = None;
         self.link_start = None;
@@ -1046,7 +1134,7 @@ impl App {
         self.selected_arrow = None;
         let Some(cur) = self.selected else {
             if !self.nodes().is_empty() {
-                self.selected = Some(0);
+                self.select(Some(0));
                 self.update_selection_flags();
             }
             return;
@@ -1076,7 +1164,7 @@ impl App {
             }
         }
         if let Some((_, i)) = best {
-            self.selected = Some(i);
+            self.select(Some(i));
             self.update_selection_flags();
         }
     }
@@ -1187,6 +1275,9 @@ fn status(app: &App, ui: &MainWindow) {
         .unwrap_or_else(|| "untitled".into());
     let dirty = if app.dirty { " [modified]" } else { "" };
     let mut left = format!("{name}{dirty}");
+    if !app.also_selected.is_empty() {
+        left.push_str(&format!("    {} nodes selected", app.also_selected.len() + 1));
+    }
     if !app.message.is_empty() {
         left.push_str("    ");
         left.push_str(&app.message);
@@ -1254,7 +1345,9 @@ fn main() {
         arrow_cache: RefCell::new(None),
         arrow_rows: RefCell::new(Vec::new()),
         hover_row: Cell::new(None),
-        drag_orig: None,
+        also_selected: Vec::new(),
+        collapse_on_release: None,
+        drag_orig: Vec::new(),
         resize_orig: None,
         message: String::new(),
         renderer: Renderer::new(),
@@ -1321,6 +1414,40 @@ fn main() {
         });
     }
 
+    // Preview only touches node flags, so it skips the per-callback refreshes.
+    {
+        let preview = app.clone();
+        ui.on_marquee_update(move |x0, y0, x1, y1| {
+            let a = preview.borrow();
+            a.set_marquee_preview(&a.marquee_hits(x0, y0, x1, y1));
+        });
+        let cancel = app.clone();
+        ui.on_marquee_cancel(move || cancel.borrow().set_marquee_preview(&[]));
+    }
+
+    hook!(on_marquee_end, |a, u, x0, y0, x1, y1, add| {
+        let hits = a.marquee_hits(x0, y0, x1, y1);
+        a.set_marquee_preview(&[]);
+        if u.get_connect_mode() != 0 {
+            a.arrow_start = None;
+            a.link_start = None;
+            u.set_connect_mode(0);
+        }
+        a.selected_arrow = None;
+        a.message.clear();
+        if !add {
+            a.select(None);
+        }
+        for i in hits {
+            if a.selected.is_none() {
+                a.selected = Some(i);
+            } else if !a.is_selected(i) {
+                a.also_selected.push(i);
+            }
+        }
+        a.update_selection_flags();
+    });
+
     hook!(on_port_clicked, |a, u, i, side| {
         let Some(node) = a.nodes().get(i as usize) else { return; };
         let id = node.id.clone();
@@ -1340,7 +1467,7 @@ fn main() {
             });
             a.arrow_start = None;
             a.link_start = None;
-            a.selected = None;
+            a.select(None);
             a.selected_arrow = Some(a.doc.pages[active].arrows.len() - 1);
             a.update_selection_flags();
             a.mark_dirty();
@@ -1349,69 +1476,82 @@ fn main() {
         } else {
             a.arrow_start = Some((id, side));
             a.selected_arrow = None;
-            a.selected = Some(i as usize);
+            a.select(Some(i as usize));
             a.update_selection_flags();
             a.message = "Click a destination attachment point (Esc cancels)".into();
         }
     });
 
-    hook!(on_node_pressed, |a, u, i| {
+    hook!(on_node_pressed, |a, u, i, ctrl| {
         if u.get_connect_mode() == 3 {
             a.link_start = None;
             u.set_connect_mode(0);
         }
         let i = i as usize;
-        a.selected = Some(i);
         a.selected_arrow = None;
-        a.update_selection_flags();
-        a.drag_orig = Some((a.nodes()[i].x, a.nodes()[i].y));
         a.message.clear();
+        a.collapse_on_release = None;
+        if ctrl && a.is_selected(i) {
+            // Ctrl+click on a selected node removes it and starts no drag.
+            a.deselect(i);
+            a.update_selection_flags();
+            a.drag_orig.clear();
+            return;
+        } else if ctrl {
+            a.make_primary(i);
+        } else if a.is_selected(i) && !a.also_selected.is_empty() {
+            a.make_primary(i);
+            a.collapse_on_release = Some(i);
+        } else {
+            a.select(Some(i));
+        }
+        a.update_selection_flags();
+        a.drag_orig = a
+            .selection()
+            .into_iter()
+            .map(|j| (j, a.nodes()[j].x, a.nodes()[j].y))
+            .collect();
     });
 
-    hook!(on_node_drag, |a, _u, i, dx, dy| {
-        let i = i as usize;
-        if let Some((ox, oy)) = a.drag_orig {
-            a.nodes_mut()[i].x = ox + dx as f64;
-            a.nodes_mut()[i].y = oy + dy as f64;
-            if let Some(mut vm) = a.model.row_data(i) {
-                vm.x = a.nodes()[i].x as f32;
-                vm.y = a.nodes()[i].y as f32;
-                a.model.set_row_data(i, vm);
-            }
+    hook!(on_node_drag, |a, _u, _i, dx, dy| {
+        for (j, ox, oy) in a.drag_orig.clone() {
+            a.set_node_pos(j, ox + dx as f64, oy + dy as f64);
         }
     });
 
-    hook!(on_node_drag_end, |a, _u, i| {
-        let i = i as usize;
-        if let Some((ox, oy)) = a.drag_orig.take() {
-            let n = &a.nodes()[i];
-            let (nx, ny) = (a.doc.snap(n.x), a.doc.snap(n.y));
-            if (nx, ny) != (ox, oy) {
-                // Record the pre-drag state for undo.
-                let mut before = a.doc.pages.clone();
-                before[a.active].nodes[i].x = ox;
-                before[a.active].nodes[i].y = oy;
-                let active = a.active;
-                a.undo.push(Snapshot { pages: before, active });
-                a.redo.clear();
-                a.nodes_mut()[i].x = nx;
-                a.nodes_mut()[i].y = ny;
-                if let Some(mut vm) = a.model.row_data(i) {
-                    vm.x = nx as f32;
-                    vm.y = ny as f32;
-                    a.model.set_row_data(i, vm);
-                }
-                a.mark_dirty();
-            } else {
-                a.nodes_mut()[i].x = ox;
-                a.nodes_mut()[i].y = oy;
-                if let Some(mut vm) = a.model.row_data(i) {
-                    vm.x = ox as f32;
-                    vm.y = oy as f32;
-                    a.model.set_row_data(i, vm);
-                }
+    hook!(on_node_drag_end, |a, _u, _i| {
+        let orig = std::mem::take(&mut a.drag_orig);
+        let collapse = a.collapse_on_release.take();
+        let Some(&(lead, ox, oy)) = orig.first() else {
+            return;
+        };
+        // Snap the pressed node and move the rest by the same amount, so a
+        // group keeps its internal layout.
+        let n = &a.nodes()[lead];
+        let (dx, dy) = (a.doc.snap(n.x) - ox, a.doc.snap(n.y) - oy);
+        if (dx, dy) == (0.0, 0.0) {
+            for &(j, x, y) in &orig {
+                a.set_node_pos(j, x, y);
             }
+            if let Some(i) = collapse {
+                a.select(Some(i));
+                a.update_selection_flags();
+            }
+            return;
         }
+        // Record the pre-drag state for undo.
+        let active = a.active;
+        let mut before = a.doc.pages.clone();
+        for &(j, x, y) in &orig {
+            before[active].nodes[j].x = x;
+            before[active].nodes[j].y = y;
+        }
+        a.undo.push(Snapshot { pages: before, active });
+        a.redo.clear();
+        for &(j, x, y) in &orig {
+            a.set_node_pos(j, x + dx, y + dy);
+        }
+        a.mark_dirty();
     });
 
     hook!(on_node_resize, |a, _u, i, dw| {
@@ -1467,7 +1607,10 @@ fn main() {
             }
             "delete" => {
                 a.selected_arrow = None;
-                a.selected = Some(i);
+                // Deleting a node in a multi-selection deletes the selection.
+                if !a.is_selected(i) {
+                    a.select(Some(i));
+                }
                 a.delete_selected();
             }
             _ => {}
@@ -1528,7 +1671,7 @@ fn main() {
         a.arrow_start = None;
         a.link_start = None;
         u.set_connect_mode(0);
-        a.selected = None;
+        a.select(None);
         a.update_selection_flags();
         a.message.clear();
     });
@@ -1557,7 +1700,7 @@ fn main() {
         if i >= 0 {
             let i = i as usize;
             if i < a.nodes().len() && a.nodes()[i].source.is_empty() {
-                a.selected = Some(i);
+                a.select(Some(i));
                 a.delete_selected();
             }
         }
@@ -1602,7 +1745,7 @@ fn main() {
             a.link_start = None;
             a.selected_arrow = None;
             u.set_connect_mode(0);
-            a.selected = None;
+            a.select(None);
             a.update_selection_flags();
             a.message.clear();
         } else if is(Key::Home) {

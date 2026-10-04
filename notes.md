@@ -161,6 +161,16 @@ Working:
 - Edit mode: double-click or Enter opens a raw-source box; Ctrl+Enter commits,
   Esc cancels (an empty new node is discarded on cancel).
 - Ctrl+Shift+N or double-click empty space creates a node. Delete removes the selection.
+- Multi-select: Ctrl+click adds or removes a node. Dragging any selected node
+  moves the group (the pressed node snaps to the grid; the rest keep their
+  offsets), as one undo step. A plain click on a group member without dragging
+  selects only that node. Delete, or Delete from a member's context menu,
+  removes the whole group. Enter and the arrow keys act on the last clicked node.
+- Selection rectangle: Shift+drag on empty canvas (plain drag still pans).
+  Dragging right selects nodes fully inside (blue); dragging left selects any
+  node the rectangle touches (green), as in CAD tools. Nodes that will be
+  selected highlight while dragging. Ctrl+Shift+drag adds to the selection;
+  Escape cancels. Panning no longer clears the selection.
 - Undo/redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y). Snapshot based for now, not
   command based as the architecture section proposed; fine at this scale.
 - Spatial navigation with arrow keys using the cone-and-score rule above.

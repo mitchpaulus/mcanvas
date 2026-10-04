@@ -23,6 +23,8 @@ export struct NodeVm {
     img: image,
     error: string,
     selected: bool,
+    // Inside the selection rectangle being dragged.
+    marquee: bool,
 }
 
 // One cell of the table grid editor. r is the grid row (after span
@@ -115,7 +117,7 @@ export component MainWindow inherits Window {
     out property <length> view-width: canvas.width;
     out property <length> view-height: canvas.height;
 
-    callback node-pressed(int);
+    callback node-pressed(int, bool);
     callback node-drag(int, length, length);
     callback node-drag-end(int);
     callback node-resize(int, length);
@@ -127,6 +129,10 @@ export component MainWindow inherits Window {
     // Canvas-coordinate pointer position over the background; returns whether
     // a click there would select an arrow.
     callback canvas-pointer(length, length, bool) -> bool;
+    // Shift+drag selection rectangle, in canvas coordinates: start, current.
+    callback marquee-update(length, length, length, length);
+    callback marquee-end(length, length, length, length, bool);
+    callback marquee-cancel();
     callback background-double-clicked(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
@@ -277,6 +283,11 @@ export component MainWindow inherits Window {
 
             keys := FocusScope {
                 key-pressed(e) => {
+                    if (e.text == Key.Escape && bg.drag-mode == 2) {
+                        bg.drag-mode = 3;
+                        root.marquee-cancel();
+                        return accept;
+                    }
                     // Also reached from inside the node editor, whose unhandled
                     // keys bubble up here; page-action commits it first.
                     if (e.modifiers.control && e.text == Key.PageDown) {
@@ -297,7 +308,15 @@ export component MainWindow inherits Window {
                     property <length> start-pan-x;
                     property <length> start-pan-y;
                     property <bool> over-arrow;
-                    mouse-cursor: self.over-arrow ? pointer : default;
+                    // 0 pressed, 1 Shift held but under the drag threshold,
+                    // 2 selection rectangle, 3 rectangle cancelled with Escape,
+                    // 4 panned. Only 0 and 1 count as a click on release.
+                    property <int> drag-mode;
+                    property <length> m-x0;
+                    property <length> m-y0;
+                    property <length> m-x1;
+                    property <length> m-y1;
+                    mouse-cursor: self.drag-mode == 2 ? crosshair : self.over-arrow ? pointer : default;
                     changed mouse-x => { self.hover(); }
                     changed mouse-y => { self.hover(); }
                     changed has-hover => { self.hover(); }
@@ -312,17 +331,38 @@ export component MainWindow inherits Window {
                         if (e.kind == PointerEventKind.down) {
                             self.start-pan-x = root.pan-x;
                             self.start-pan-y = root.pan-y;
+                            self.drag-mode = e.modifiers.shift ? 1 : 0;
+                            self.m-x0 = (self.mouse-x - root.pan-x) / root.zoom;
+                            self.m-y0 = (self.mouse-y - root.pan-y) / root.zoom;
+                            keys.focus();
+                        }
+                        if (e.kind == PointerEventKind.up && self.drag-mode == 2) {
+                            root.marquee-end(self.m-x0, self.m-y0, self.m-x1, self.m-y1, e.modifiers.control);
                         }
                     }
                     moved => {
-                        if (self.pressed) {
+                        if (self.drag-mode == 0 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
+                            self.drag-mode = 4;
+                        }
+                        if (self.drag-mode == 0 || self.drag-mode == 4) {
                             root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
                             root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
                         }
+                        if (self.drag-mode == 1 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
+                            self.drag-mode = 2;
+                        }
+                        if (self.drag-mode == 2) {
+                            self.m-x1 = (self.mouse-x - root.pan-x) / root.zoom;
+                            self.m-y1 = (self.mouse-y - root.pan-y) / root.zoom;
+                            root.marquee-update(self.m-x0, self.m-y0, self.m-x1, self.m-y1);
+                        }
                     }
                     clicked => {
-                        root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
-                        keys.focus();
+                        // A pan or a finished or cancelled rectangle is not a click.
+                        if (self.drag-mode < 2) {
+                            root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                            keys.focus();
+                        }
                     }
                     double-clicked => {
                         root.background-double-clicked(
@@ -388,8 +428,8 @@ export component MainWindow inherits Window {
                     width: round(n.w * root.zoom / 1phx) * 1phx;
                     height: round(n.h * root.zoom / 1phx) * 1phx;
                     background: white;
-                    border-width: n.selected || body.has-hover || handle.has-hover ? 2px : 1px;
-                    border-color: n.selected ? #3b82f6 : body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
+                    border-width: n.selected || n.marquee || body.has-hover || handle.has-hover ? 2px : 1px;
+                    border-color: n.selected ? #3b82f6 : n.marquee || body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
                     border-radius: 3px;
                     clip: true;
 
@@ -419,7 +459,7 @@ export component MainWindow inherits Window {
                             if (e.kind == PointerEventKind.down) {
                                 self.start-x = node.x + self.mouse-x;
                                 self.start-y = node.y + self.mouse-y;
-                                root.node-pressed(i);
+                                root.node-pressed(i, e.modifiers.control);
                                 keys.focus();
                             }
                             if (e.kind == PointerEventKind.up) {
@@ -494,6 +534,19 @@ export component MainWindow inherits Window {
                             clicked => { root.port-clicked(i, side); keys.focus(); }
                         }
                     }
+                }
+
+                // Dragging right selects nodes fully inside (blue); dragging
+                // left selects any node the rectangle touches (green), as in CAD.
+                if bg.drag-mode == 2 && bg.pressed : Rectangle {
+                    property <bool> crossing: bg.m-x1 < bg.m-x0;
+                    x: root.pan-x + min(bg.m-x0, bg.m-x1) * root.zoom;
+                    y: root.pan-y + min(bg.m-y0, bg.m-y1) * root.zoom;
+                    width: abs(bg.m-x1 - bg.m-x0) * root.zoom;
+                    height: abs(bg.m-y1 - bg.m-y0) * root.zoom;
+                    background: self.crossing ? #16a34a1a : #3b82f61a;
+                    border-width: 1px;
+                    border-color: self.crossing ? #16a34a : #3b82f6;
                 }
 
                 if root.connect-mode == 3 : Rectangle {
