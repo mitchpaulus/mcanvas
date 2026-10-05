@@ -28,3 +28,6 @@ opt-level = 3
 
 [workspace]
 members = ["xtask"]
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"

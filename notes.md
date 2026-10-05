@@ -216,6 +216,29 @@ Working:
   TouchArea wrapping the background and nodes: a TouchArea updates `mouse-x`
   and `has-hover` before its children see the event, so it follows the mouse
   over nodes too.
+- External editor (2026-10-05): Ctrl+E (Edit > Edit in External Editor, or
+  right-click > Edit in External Editor) opens the selected Typst node's source
+  in the editor named by `MCANVAS_EDITOR`, e.g. `MCANVAS_EDITOR="code --wait"`.
+  `VISUAL` and `EDITOR` are ignored since they usually name terminal editors.
+  There is no fallback to the OS default app for `.typ`: openers such as
+  `xdg-open` return at once, so there is no editor process to wait on. The source goes to `<temp>/mcanvas/<id>.typ`;
+  a background thread polls it every 300 ms while the editor runs and every save
+  updates the node (one undo step per save), with a final read when the editor
+  exits. The editor must wait for the file to be closed (`code --wait`,
+  `subl -w`, `gvim -f`); one that returns within 2 s without a save gets a
+  status-bar hint. Ctrl+E while typing in a node commits that text first. A
+  node can be open in only one external editor at a time, and the canvas stays
+  usable meanwhile.
+  On Windows, if the process lacks `MCANVAS_EDITOR` (it was set in Settings
+  after mcanvas or its launching shell started), the saved user then machine
+  value is read from the registry, so no restart is needed. The program is
+  resolved by mcanvas itself (a path, or PATH plus PATHEXT on Windows) so the
+  status bar can say whether the variable is unset or empty, the program was
+  not found (and how many PATH folders were searched), or it was found but
+  failed to start or exited with an error; success shows the full path.
+  Console editors (`nvim.exe`) get their own console window via
+  `CREATE_NEW_CONSOLE`; `.cmd`/`.bat` launchers (`code.cmd`) run with
+  `CREATE_NO_WINDOW` so no stray console appears.
 
 - Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
   or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a

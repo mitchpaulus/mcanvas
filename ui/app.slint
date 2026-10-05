@@ -145,6 +145,9 @@ export component MainWindow inherits Window {
     callback paste-at(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
+    // Text saved in, and exit of, an external editor for the node with this id.
+    callback external-edited(string, string);
+    callback external-closed(string, string);
     callback table-cell-edited(int, string);
     // Grid editor context menu: operation name and the cell it was opened on.
     callback table-op(string, int);
@@ -190,6 +193,14 @@ export component MainWindow inherits Window {
         }
         root.page-op(op, i);
     }
+    // Commit an open node editor first, so its text is what the external
+    // editor gets.
+    public function edit-externally() {
+        if (root.edit-index >= 0) {
+            root.commit-edit(root.edit-index, edit-input.text);
+        }
+        root.command("external-edit");
+    }
     public function focus-canvas() {
         keys.focus();
     }
@@ -223,6 +234,7 @@ export component MainWindow inherits Window {
             MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
             MenuItem { title: "Add Table"; shortcut: @keys(Control + Shift + T); activated => { root.command("add-table"); } }
             MenuItem { title: "Edit Node"; activated => { root.command("edit-node"); } }
+            MenuItem { title: "Edit in External Editor"; shortcut: @keys(Control + E); activated => { root.edit-externally(); } }
             MenuItem { title: "Straight Arrow"; activated => { root.command("arrow-straight"); } }
             MenuItem { title: "Orthogonal Arrow"; activated => { root.command("arrow-orthogonal"); } }
             MenuItem { title: "Link Middles"; activated => { root.command("link-middles"); } }
@@ -536,6 +548,7 @@ export component MainWindow inherits Window {
                         ContextMenuArea {
                             Menu {
                                 MenuItem { title: "Edit"; activated => { root.node-menu("edit", i); } }
+                                MenuItem { title: "Edit in External Editor"; activated => { root.node-menu("external-edit", i); } }
                                 MenuItem { title: "Copy"; activated => { root.node-menu("copy", i); } }
                                 MenuItem { title: "Copy as Typst"; activated => { root.node-menu("copy-typst", i); } }
                                 MenuSeparator {}

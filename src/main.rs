@@ -2,11 +2,13 @@
 
 mod arrows;
 mod doc;
+mod external;
 mod picture;
 mod render;
 mod table;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -76,6 +78,8 @@ struct App {
     col_resize_orig: Option<f64>,
     /// Node copied with Ctrl+C, for pasting back onto a canvas.
     copied: Option<Copied>,
+    /// Ids of nodes open in an external editor.
+    external: HashSet<String>,
 }
 
 /// A copied node. The system clipboard gets its Typst source (or its pixels,
@@ -1025,6 +1029,54 @@ impl App {
         }
     }
 
+    /// Open a Typst node's source in the user's editor. Saves there flow back
+    /// through the `external-edited` callback.
+    fn edit_externally(&mut self, ui: &MainWindow, i: usize) {
+        let node = &self.nodes()[i];
+        if node.kind != "typst" {
+            self.message = "only Typst nodes open in an external editor".into();
+            return;
+        }
+        if self.external.contains(&node.id) {
+            self.message = "this node is already open in an external editor".into();
+            return;
+        }
+        let argv = match external::editor_command() {
+            Ok(argv) => argv,
+            Err(e) => {
+                self.message = e;
+                return;
+            }
+        };
+        let id = node.id.clone();
+        let weak = ui.as_weak();
+        let send = {
+            let id = id.clone();
+            move |event| {
+                let id = SharedString::from(id.as_str());
+                let _ = weak.upgrade_in_event_loop(move |ui| match event {
+                    external::Event::Saved(text) => ui.invoke_external_edited(id, text.into()),
+                    external::Event::Closed(note) => ui.invoke_external_closed(id, note.into()),
+                });
+            }
+        };
+        match external::open(argv, &id, node.source.clone(), send) {
+            Ok(program) => {
+                self.external.insert(id);
+                self.message =
+                    format!("editing in {}; each save updates the node", program.display());
+            }
+            Err(e) => self.message = e,
+        }
+    }
+
+    /// Page and index of the node with this id, on any page.
+    fn find_node(&self, id: &str) -> Option<(usize, usize)> {
+        self.doc.pages.iter().enumerate().find_map(|(p, page)| {
+            page.nodes.iter().position(|n| n.id == id).map(|j| (p, j))
+        })
+    }
+
     /// Rebuild the grid editor's cell and divider models from the working
     /// copy. Rows are updated in place when the count is unchanged so that a
     /// divider drag in progress keeps its TouchArea alive.
@@ -1472,6 +1524,7 @@ fn main() {
         cell_model,
         edge_model,
         col_resize_orig: None,
+        external: HashSet::new(),
     }));
     {
         let a = app.borrow();
@@ -1719,6 +1772,7 @@ fn main() {
         }
         match op.as_str() {
             "edit" => a.open_editor(&u, i),
+            "external-edit" => a.edit_externally(&u, i),
             "copy" => a.copy_node(i),
             "copy-typst" if a.nodes()[i].data.is_some() => {
                 a.message = "embedded image has no file path to reference in Typst".into();
@@ -1814,6 +1868,33 @@ fn main() {
             a.mark_dirty();
         }
         u.invoke_end_edit();
+    });
+
+    hook!(on_external_edited, |a, u, id, text| {
+        let Some((p, j)) = a.find_node(&id) else {
+            a.message = "external edit not applied: the node no longer exists".into();
+            return;
+        };
+        let text = text.to_string();
+        if a.doc.pages[p].nodes[j].source == text {
+            return;
+        }
+        a.snapshot();
+        a.doc.pages[p].nodes[j].source = text.clone();
+        if p == a.active {
+            a.refresh_node(j);
+            // Keep an open in-place editor from committing stale text later.
+            if u.get_edit_index() == j as i32 {
+                u.invoke_begin_edit(j as i32, text.into());
+            }
+        }
+        a.mark_dirty();
+        a.message = "node updated from external editor".into();
+    });
+
+    hook!(on_external_closed, |a, _u, id, note| {
+        a.external.remove(id.as_str());
+        a.message = if note.is_empty() { "external editor closed".into() } else { note.into() };
     });
 
     hook!(on_cancel_edit, |a, u| {
@@ -1998,6 +2079,10 @@ fn main() {
                     a.open_editor(&u, i);
                 }
             }
+            "external-edit" if !editing => match a.selected {
+                Some(i) => a.edit_externally(&u, i),
+                None => a.message = "select a node to edit externally".into(),
+            },
             "add-table" if !editing => {
                 let x = (u.get_view_width() / 2.0 - u.get_pan_x()) / u.get_zoom();
                 let y = (u.get_view_height() / 2.0 - u.get_pan_y()) / u.get_zoom();
