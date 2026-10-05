@@ -118,6 +118,11 @@ export component MainWindow inherits Window {
     in-out property <string> status-right;
     out property <length> view-width: canvas.width;
     out property <length> view-height: canvas.height;
+    // Mouse position over the canvas in view coordinates, valid while
+    // pointer-in is true (also over nodes, unlike the background's hover).
+    out property <bool> pointer-in: tracker.has-hover;
+    out property <length> pointer-x: tracker.mouse-x;
+    out property <length> pointer-y: tracker.mouse-y;
 
     callback node-pressed(int, bool);
     callback node-drag(int, length, length);
@@ -125,7 +130,7 @@ export component MainWindow inherits Window {
     callback node-resize(int, length);
     callback node-resize-end(int);
     callback node-edit-request(int);
-    // Node context menu: "edit", "copy-typst", "delete".
+    // Node context menu: "edit", "copy", "copy-typst", "delete".
     callback node-menu(string, int);
     callback background-clicked(length, length);
     // Canvas-coordinate pointer position over the background; returns whether
@@ -136,6 +141,8 @@ export component MainWindow inherits Window {
     callback marquee-end(length, length, length, length, bool);
     callback marquee-cancel();
     callback background-double-clicked(length, length);
+    // Background context menu "Paste here", at a point in canvas coordinates.
+    callback paste-at(length, length);
     callback commit-edit(int, string);
     callback cancel-edit();
     callback table-cell-edited(int, string);
@@ -208,8 +215,9 @@ export component MainWindow inherits Window {
             MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.command("undo"); } }
             MenuItem { title: "Redo"; shortcut: @keys(Control + Y); activated => { root.command("redo"); } }
             MenuSeparator {}
-            // Ctrl+V is handled by the canvas key handler, not declared here,
-            // so it keeps working as text paste inside the editors.
+            // Ctrl+C and Ctrl+V are handled by the canvas key handler, not
+            // declared here, so they keep working on text inside the editors.
+            MenuItem { title: "Copy Node (Ctrl+C)"; activated => { root.command("copy"); } }
             MenuItem { title: "Paste (Ctrl+V)"; activated => { root.command("paste"); } }
             MenuSeparator {}
             MenuItem { title: "Add Node"; shortcut: @keys(Control + Shift + N); activated => { root.command("add-node"); } }
@@ -322,386 +330,409 @@ export component MainWindow inherits Window {
                     reject
                 }
 
-                bg := TouchArea {
-                    property <length> start-pan-x;
-                    property <length> start-pan-y;
-                    property <bool> over-arrow;
-                    // 0 pressed, 1 Shift held but under the drag threshold,
-                    // 2 selection rectangle, 3 rectangle cancelled with Escape,
-                    // 4 panned. Only 0 and 1 count as a click on release.
-                    property <int> drag-mode;
-                    property <length> m-x0;
-                    property <length> m-y0;
-                    property <length> m-x1;
-                    property <length> m-y1;
-                    mouse-cursor: self.drag-mode == 2 ? crosshair : self.over-arrow ? pointer : default;
-                    changed mouse-x => { self.hover(); }
-                    changed mouse-y => { self.hover(); }
-                    changed has-hover => { self.hover(); }
-                    changed pressed => { self.hover(); }
-                    function hover() {
-                        self.over-arrow = root.canvas-pointer(
-                            (self.mouse-x - root.pan-x) / root.zoom,
-                            (self.mouse-y - root.pan-y) / root.zoom,
-                            self.has-hover && !self.pressed);
-                    }
-                    pointer-event(e) => {
-                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
-                            root.command("zoom-fit");
+                // Tracks the mouse for Ctrl+V. A TouchArea sees pointer moves
+                // before its children, so this follows the mouse over nodes as
+                // well as the background; the children handle the events.
+                tracker := TouchArea {
+                    bg := TouchArea {
+                        property <length> start-pan-x;
+                        property <length> start-pan-y;
+                        property <bool> over-arrow;
+                        // 0 pressed, 1 Shift held but under the drag threshold,
+                        // 2 selection rectangle, 3 rectangle cancelled with Escape,
+                        // 4 panned. Only 0 and 1 count as a click on release.
+                        property <int> drag-mode;
+                        property <length> m-x0;
+                        property <length> m-y0;
+                        property <length> m-x1;
+                        property <length> m-y1;
+                        // Canvas point the background menu was opened on.
+                        property <length> menu-x;
+                        property <length> menu-y;
+                        mouse-cursor: self.drag-mode == 2 ? crosshair : self.over-arrow ? pointer : default;
+                        changed mouse-x => { self.hover(); }
+                        changed mouse-y => { self.hover(); }
+                        changed has-hover => { self.hover(); }
+                        changed pressed => { self.hover(); }
+                        function hover() {
+                            self.over-arrow = root.canvas-pointer(
+                                (self.mouse-x - root.pan-x) / root.zoom,
+                                (self.mouse-y - root.pan-y) / root.zoom,
+                                self.has-hover && !self.pressed);
                         }
-                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                            self.start-pan-x = root.pan-x;
-                            self.start-pan-y = root.pan-y;
-                            self.drag-mode = e.modifiers.shift ? 1 : 0;
-                            self.m-x0 = (self.mouse-x - root.pan-x) / root.zoom;
-                            self.m-y0 = (self.mouse-y - root.pan-y) / root.zoom;
-                            keys.focus();
-                        }
-                        if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left && self.drag-mode == 2) {
-                            root.marquee-end(self.m-x0, self.m-y0, self.m-x1, self.m-y1, e.modifiers.control);
-                        }
-                    }
-                    moved => {
-                        if (self.drag-mode == 0 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
-                            self.drag-mode = 4;
-                        }
-                        if (self.drag-mode == 0 || self.drag-mode == 4) {
-                            root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
-                            root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
-                        }
-                        if (self.drag-mode == 1 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
-                            self.drag-mode = 2;
-                        }
-                        if (self.drag-mode == 2) {
-                            self.m-x1 = (self.mouse-x - root.pan-x) / root.zoom;
-                            self.m-y1 = (self.mouse-y - root.pan-y) / root.zoom;
-                            root.marquee-update(self.m-x0, self.m-y0, self.m-x1, self.m-y1);
-                        }
-                    }
-                    clicked => {
-                        // A pan or a finished or cancelled rectangle is not a click.
-                        if (self.drag-mode < 2) {
-                            root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
-                            keys.focus();
-                        }
-                    }
-                    double-clicked => {
-                        root.background-double-clicked(
-                            (self.mouse-x - root.pan-x) / root.zoom,
-                            (self.mouse-y - root.pan-y) / root.zoom);
-                    }
-                    scroll-event(e) => {
-                        if (e.modifiers.control) {
-                            root.zoom-at(
-                                clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom,
-                                self.mouse-x, self.mouse-y);
-                        } else if (e.modifiers.shift) {
-                            root.pan-x += e.delta-y + e.delta-x;
-                        } else {
-                            root.pan-x += e.delta-x;
-                            root.pan-y += e.delta-y;
-                        }
-                        accept
-                    }
-                }
-
-                // Path reserves half its stroke on each side. Compensate so
-                // its viewbox maps exactly to canvas coordinates.
-                for arrow in root.arrows : Rectangle {
-                    // Hover halo: a fixed screen width, so it stays visible
-                    // when zoomed out.
-                    if arrow.hovered : Path {
-                        x: root.pan-x + arrow.x * root.zoom - 5px;
-                        y: root.pan-y + arrow.y * root.zoom - 5px;
-                        width: arrow.w * root.zoom + 10px;
-                        height: arrow.h * root.zoom + 10px;
-                        commands: arrow.commands;
-                        viewbox-width: arrow.w / 1px;
-                        viewbox-height: arrow.h / 1px;
-                        fill: transparent;
-                        stroke: #3b82f650;
-                        stroke-width: 10px;
-                        stroke-line-cap: round;
-                        stroke-line-join: round;
-                    }
-                    Path {
-                        x: root.pan-x + (arrow.x - 1px) * root.zoom;
-                        y: root.pan-y + (arrow.y - 1px) * root.zoom;
-                        width: (arrow.w + 2px) * root.zoom;
-                        height: (arrow.h + 2px) * root.zoom;
-                        commands: arrow.commands;
-                        viewbox-width: arrow.w / 1px;
-                        viewbox-height: arrow.h / 1px;
-                        fill: transparent;
-                        stroke: arrow.color;
-                        stroke-width: 2px * root.zoom;
-                        stroke-line-cap: round;
-                        stroke-line-join: round;
-                    }
-                }
-
-                // Node geometry is snapped to whole physical pixels. The SVG
-                // is rasterized at the element's pixel size, and a fractional
-                // position or size makes the GPU resample it, which blurs text.
-                for n[i] in root.nodes : node := Rectangle {
-                    x: round((root.pan-x + n.x * root.zoom) / 1phx) * 1phx;
-                    y: round((root.pan-y + n.y * root.zoom) / 1phx) * 1phx;
-                    width: round(n.w * root.zoom / 1phx) * 1phx;
-                    height: round(n.h * root.zoom / 1phx) * 1phx;
-                    background: white;
-                    border-width: n.selected || n.marquee || body.has-hover || handle.has-hover ? 2px : 1px;
-                    border-color: n.selected ? #3b82f6 : n.marquee || body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
-                    border-radius: 3px;
-                    clip: true;
-
-                    Image {
-                        source: n.img;
-                        x: 0; y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        image-fit: fill;
-                    }
-                    if n.error != "" : Text {
-                        x: 6px; y: 6px;
-                        width: parent.width - 12px;
-                        text: n.error;
-                        color: #b00020;
-                        wrap: word-wrap;
-                        font-size: 11px * root.zoom;
-                    }
-                    // Drag. Mouse positions are measured in canvas coordinates
-                    // (node.x + local mouse-x), not in this TouchArea's own
-                    // coordinates, because the TouchArea moves with the node
-                    // while dragging, which would feed back into the delta.
-                    body := TouchArea {
-                        property <length> start-x;
-                        property <length> start-y;
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                                 root.command("zoom-fit");
                             }
-                            if (e.button != PointerEventButton.left) {
-                                return;
-                            }
-                            if (e.kind == PointerEventKind.down) {
-                                self.start-x = node.x + self.mouse-x;
-                                self.start-y = node.y + self.mouse-y;
-                                root.node-pressed(i, e.modifiers.control);
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                self.start-pan-x = root.pan-x;
+                                self.start-pan-y = root.pan-y;
+                                self.drag-mode = e.modifiers.shift ? 1 : 0;
+                                self.m-x0 = (self.mouse-x - root.pan-x) / root.zoom;
+                                self.m-y0 = (self.mouse-y - root.pan-y) / root.zoom;
                                 keys.focus();
                             }
-                            if (e.kind == PointerEventKind.up) {
-                                root.node-drag-end(i);
+                            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left && self.drag-mode == 2) {
+                                root.marquee-end(self.m-x0, self.m-y0, self.m-x1, self.m-y1, e.modifiers.control);
+                            }
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                self.menu-x = (self.mouse-x - root.pan-x) / root.zoom;
+                                self.menu-y = (self.mouse-y - root.pan-y) / root.zoom;
+                                bg-menu.show({ x: self.mouse-x, y: self.mouse-y });
                             }
                         }
                         moved => {
-                            if (self.pressed) {
-                                root.node-drag(i,
-                                    (node.x + self.mouse-x - self.start-x) / root.zoom,
-                                    (node.y + self.mouse-y - self.start-y) / root.zoom);
+                            if (self.drag-mode == 0 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
+                                self.drag-mode = 4;
+                            }
+                            if (self.drag-mode == 0 || self.drag-mode == 4) {
+                                root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                                root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                            }
+                            if (self.drag-mode == 1 && max(abs(self.mouse-x - self.pressed-x), abs(self.mouse-y - self.pressed-y)) > 4px) {
+                                self.drag-mode = 2;
+                            }
+                            if (self.drag-mode == 2) {
+                                self.m-x1 = (self.mouse-x - root.pan-x) / root.zoom;
+                                self.m-y1 = (self.mouse-y - root.pan-y) / root.zoom;
+                                root.marquee-update(self.m-x0, self.m-y0, self.m-x1, self.m-y1);
+                            }
+                        }
+                        clicked => {
+                            // A pan or a finished or cancelled rectangle is not a click.
+                            if (self.drag-mode < 2) {
+                                root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                                keys.focus();
                             }
                         }
                         double-clicked => {
-                            root.node-edit-request(i);
+                            root.background-double-clicked(
+                                (self.mouse-x - root.pan-x) / root.zoom,
+                                (self.mouse-y - root.pan-y) / root.zoom);
+                        }
+                        scroll-event(e) => {
+                            if (e.modifiers.control) {
+                                root.zoom-at(
+                                    clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom,
+                                    self.mouse-x, self.mouse-y);
+                            } else if (e.modifiers.shift) {
+                                root.pan-x += e.delta-y + e.delta-x;
+                            } else {
+                                root.pan-x += e.delta-x;
+                                root.pan-y += e.delta-y;
+                            }
+                            accept
                         }
                     }
-                    ContextMenuArea {
+                    // Shown by the background's right-click handler, which
+                    // records where the paste goes; zero-sized so it takes no
+                    // clicks itself.
+                    bg-menu := ContextMenuArea {
+                        x: 0; y: 0; width: 0; height: 0;
                         Menu {
-                            MenuItem { title: "Edit"; activated => { root.node-menu("edit", i); } }
-                            MenuItem { title: "Copy as Typst"; activated => { root.node-menu("copy-typst", i); } }
-                            MenuSeparator {}
-                            MenuItem { title: "Delete"; activated => { root.node-menu("delete", i); } }
+                            MenuItem { title: "Paste here"; activated => { root.paste-at(bg.menu-x, bg.menu-y); } }
                         }
                     }
-                    // Width resize handle. Same canvas-coordinate trick: the
-                    // handle sits at the right edge and moves as the width changes.
-                    handle := TouchArea {
-                        property <length> start-x;
-                        x: parent.width - 12px;
-                        y: parent.height - 12px;
-                        width: 12px;
-                        height: 12px;
-                        mouse-cursor: ew-resize;
-                        pointer-event(e) => {
-                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
-                                root.command("zoom-fit");
-                            }
-                            if (e.button != PointerEventButton.left) {
-                                return;
-                            }
-                            if (e.kind == PointerEventKind.down) {
-                                self.start-x = node.x + self.x + self.mouse-x;
-                            }
-                            if (e.kind == PointerEventKind.up) {
-                                root.node-resize-end(i);
-                            }
-                        }
-                        moved => {
-                            if (self.pressed) {
-                                root.node-resize(i, (node.x + self.x + self.mouse-x - self.start-x) / root.zoom);
-                            }
-                        }
-                        Rectangle {
-                            x: 4px; y: 4px; width: 6px; height: 6px;
-                            background: n.selected || handle.has-hover ? #3b82f6 : #bbbbbb;
-                        }
-                    }
-                }
 
-                // Ports sit above nodes so the full target remains clickable.
-                for n[i] in root.nodes : Rectangle {
-                    visible: root.connect-mode == 1 || root.connect-mode == 2;
-                    x: root.pan-x + n.x * root.zoom;
-                    y: root.pan-y + n.y * root.zoom;
-                    width: n.w * root.zoom;
-                    height: n.h * root.zoom;
-                    for side in 4 : Rectangle {
-                        x: (side == 1 ? parent.width : side == 3 ? 0px : parent.width / 2) - 6px;
-                        y: (side == 2 ? parent.height : side == 0 ? 0px : parent.height / 2) - 6px;
-                        width: 12px; height: 12px;
-                        border-radius: 6px;
-                        background: port.has-hover ? #2563eb : white;
-                        border-width: 2px;
-                        border-color: #2563eb;
-                        port := TouchArea {
-                            mouse-cursor: crosshair;
+                    // Path reserves half its stroke on each side. Compensate so
+                    // its viewbox maps exactly to canvas coordinates.
+                    for arrow in root.arrows : Rectangle {
+                        // Hover halo: a fixed screen width, so it stays visible
+                        // when zoomed out.
+                        if arrow.hovered : Path {
+                            x: root.pan-x + arrow.x * root.zoom - 5px;
+                            y: root.pan-y + arrow.y * root.zoom - 5px;
+                            width: arrow.w * root.zoom + 10px;
+                            height: arrow.h * root.zoom + 10px;
+                            commands: arrow.commands;
+                            viewbox-width: arrow.w / 1px;
+                            viewbox-height: arrow.h / 1px;
+                            fill: transparent;
+                            stroke: #3b82f650;
+                            stroke-width: 10px;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
+                        }
+                        Path {
+                            x: root.pan-x + (arrow.x - 1px) * root.zoom;
+                            y: root.pan-y + (arrow.y - 1px) * root.zoom;
+                            width: (arrow.w + 2px) * root.zoom;
+                            height: (arrow.h + 2px) * root.zoom;
+                            commands: arrow.commands;
+                            viewbox-width: arrow.w / 1px;
+                            viewbox-height: arrow.h / 1px;
+                            fill: transparent;
+                            stroke: arrow.color;
+                            stroke-width: 2px * root.zoom;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
+                        }
+                    }
+
+                    // Node geometry is snapped to whole physical pixels. The SVG
+                    // is rasterized at the element's pixel size, and a fractional
+                    // position or size makes the GPU resample it, which blurs text.
+                    for n[i] in root.nodes : node := Rectangle {
+                        x: round((root.pan-x + n.x * root.zoom) / 1phx) * 1phx;
+                        y: round((root.pan-y + n.y * root.zoom) / 1phx) * 1phx;
+                        width: round(n.w * root.zoom / 1phx) * 1phx;
+                        height: round(n.h * root.zoom / 1phx) * 1phx;
+                        background: white;
+                        border-width: n.selected || n.marquee || body.has-hover || handle.has-hover ? 2px : 1px;
+                        border-color: n.selected ? #3b82f6 : n.marquee || body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
+                        border-radius: 3px;
+                        clip: true;
+
+                        Image {
+                            source: n.img;
+                            x: 0; y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            image-fit: fill;
+                        }
+                        if n.error != "" : Text {
+                            x: 6px; y: 6px;
+                            width: parent.width - 12px;
+                            text: n.error;
+                            color: #b00020;
+                            wrap: word-wrap;
+                            font-size: 11px * root.zoom;
+                        }
+                        // Drag. Mouse positions are measured in canvas coordinates
+                        // (node.x + local mouse-x), not in this TouchArea's own
+                        // coordinates, because the TouchArea moves with the node
+                        // while dragging, which would feed back into the delta.
+                        body := TouchArea {
+                            property <length> start-x;
+                            property <length> start-y;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                    root.command("zoom-fit");
+                                }
+                                if (e.button != PointerEventButton.left) {
+                                    return;
+                                }
+                                if (e.kind == PointerEventKind.down) {
+                                    self.start-x = node.x + self.mouse-x;
+                                    self.start-y = node.y + self.mouse-y;
+                                    root.node-pressed(i, e.modifiers.control);
+                                    keys.focus();
+                                }
+                                if (e.kind == PointerEventKind.up) {
+                                    root.node-drag-end(i);
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.node-drag(i,
+                                        (node.x + self.mouse-x - self.start-x) / root.zoom,
+                                        (node.y + self.mouse-y - self.start-y) / root.zoom);
+                                }
+                            }
+                            double-clicked => {
+                                root.node-edit-request(i);
+                            }
+                        }
+                        ContextMenuArea {
+                            Menu {
+                                MenuItem { title: "Edit"; activated => { root.node-menu("edit", i); } }
+                                MenuItem { title: "Copy"; activated => { root.node-menu("copy", i); } }
+                                MenuItem { title: "Copy as Typst"; activated => { root.node-menu("copy-typst", i); } }
+                                MenuSeparator {}
+                                MenuItem { title: "Delete"; activated => { root.node-menu("delete", i); } }
+                            }
+                        }
+                        // Width resize handle. Same canvas-coordinate trick: the
+                        // handle sits at the right edge and moves as the width changes.
+                        handle := TouchArea {
+                            property <length> start-x;
+                            x: parent.width - 12px;
+                            y: parent.height - 12px;
+                            width: 12px;
+                            height: 12px;
+                            mouse-cursor: ew-resize;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                    root.command("zoom-fit");
+                                }
+                                if (e.button != PointerEventButton.left) {
+                                    return;
+                                }
+                                if (e.kind == PointerEventKind.down) {
+                                    self.start-x = node.x + self.x + self.mouse-x;
+                                }
+                                if (e.kind == PointerEventKind.up) {
+                                    root.node-resize-end(i);
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.node-resize(i, (node.x + self.x + self.mouse-x - self.start-x) / root.zoom);
+                                }
+                            }
+                            Rectangle {
+                                x: 4px; y: 4px; width: 6px; height: 6px;
+                                background: n.selected || handle.has-hover ? #3b82f6 : #bbbbbb;
+                            }
+                        }
+                    }
+
+                    // Ports sit above nodes so the full target remains clickable.
+                    for n[i] in root.nodes : Rectangle {
+                        visible: root.connect-mode == 1 || root.connect-mode == 2;
+                        x: root.pan-x + n.x * root.zoom;
+                        y: root.pan-y + n.y * root.zoom;
+                        width: n.w * root.zoom;
+                        height: n.h * root.zoom;
+                        for side in 4 : Rectangle {
+                            x: (side == 1 ? parent.width : side == 3 ? 0px : parent.width / 2) - 6px;
+                            y: (side == 2 ? parent.height : side == 0 ? 0px : parent.height / 2) - 6px;
+                            width: 12px; height: 12px;
+                            border-radius: 6px;
+                            background: port.has-hover ? #2563eb : white;
+                            border-width: 2px;
+                            border-color: #2563eb;
+                            port := TouchArea {
+                                mouse-cursor: crosshair;
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                                        root.command("zoom-fit");
+                                    }
+                                }
+                                clicked => { root.port-clicked(i, side); keys.focus(); }
+                            }
+                        }
+                    }
+
+                    // Dragging right selects nodes fully inside (blue); dragging
+                    // left selects any node the rectangle touches (green), as in CAD.
+                    if bg.drag-mode == 2 && bg.pressed : Rectangle {
+                        property <bool> crossing: bg.m-x1 < bg.m-x0;
+                        x: root.pan-x + min(bg.m-x0, bg.m-x1) * root.zoom;
+                        y: root.pan-y + min(bg.m-y0, bg.m-y1) * root.zoom;
+                        width: abs(bg.m-x1 - bg.m-x0) * root.zoom;
+                        height: abs(bg.m-y1 - bg.m-y0) * root.zoom;
+                        background: self.crossing ? #16a34a1a : #3b82f61a;
+                        border-width: 1px;
+                        border-color: self.crossing ? #16a34a : #3b82f6;
+                    }
+
+                    if root.connect-mode == 3 : Rectangle {
+                        // The wide band is the actual landing range: 36 screen px.
+                        for segment[i] in root.link-segments : Rectangle {
+                            x: root.pan-x + segment.x * root.zoom - 18px;
+                            y: root.pan-y + segment.y * root.zoom - 18px;
+                            width: segment.w * root.zoom + 36px;
+                            height: segment.h * root.zoom + 36px;
+                            border-radius: 18px;
+                            background: i == root.link-hover ? (segment.eligible ? #4ade8030 : #ef444430) : segment.eligible ? #3b82f610 : transparent;
+                            Rectangle {
+                                x: segment.w == 0px ? (parent.width - self.width) / 2 : 18px;
+                                y: segment.h == 0px ? (parent.height - self.height) / 2 : 18px;
+                                width: max(segment.w * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
+                                height: max(segment.h * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
+                                border-radius: 4px;
+                                background: segment.selected ? #9333ea : i == root.link-hover ? (segment.eligible ? #16a34a : #dc2626) : segment.eligible ? #3b82f680 : transparent;
+                            }
+                        }
+                        // Paint the hovered segment last so coincident candidates
+                        // cannot obscure which arrow the next click will choose.
+                        if root.link-hover >= 0 : Rectangle {
+                            property <LinkSegmentVm> segment: root.link-segments[root.link-hover];
+                            x: root.pan-x + self.segment.x * root.zoom - (self.segment.w == 0px ? 4px : 0px);
+                            y: root.pan-y + self.segment.y * root.zoom - (self.segment.h == 0px ? 4px : 0px);
+                            width: max(self.segment.w * root.zoom, 8px);
+                            height: max(self.segment.h * root.zoom, 8px);
+                            border-radius: 4px;
+                            background: self.segment.eligible ? #16a34a : #dc2626;
+                        }
+                        link-area := TouchArea {
+                            mouse-cursor: root.link-hover >= 0 && root.link-segments[root.link-hover].eligible ? pointer : not-allowed;
                             pointer-event(e) => {
                                 if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                                     root.command("zoom-fit");
                                 }
                             }
-                            clicked => { root.port-clicked(i, side); keys.focus(); }
+                            changed mouse-x => {
+                                root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                            }
+                            changed mouse-y => {
+                                root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                            }
+                            changed has-hover => {
+                                root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
+                            }
+                            clicked => {
+                                root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
+                                keys.focus();
+                            }
+                            scroll-event(e) => {
+                                if (e.modifiers.control) {
+                                    root.zoom-at(clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom, self.mouse-x, self.mouse-y);
+                                } else {
+                                    root.pan-x += e.delta-x;
+                                    root.pan-y += e.delta-y;
+                                }
+                                root.link-pointer((self.mouse-x - root.pan-x)/root.zoom,(self.mouse-y - root.pan-y)/root.zoom,true);
+                                accept
+                            }
                         }
-                    }
-                }
-
-                // Dragging right selects nodes fully inside (blue); dragging
-                // left selects any node the rectangle touches (green), as in CAD.
-                if bg.drag-mode == 2 && bg.pressed : Rectangle {
-                    property <bool> crossing: bg.m-x1 < bg.m-x0;
-                    x: root.pan-x + min(bg.m-x0, bg.m-x1) * root.zoom;
-                    y: root.pan-y + min(bg.m-y0, bg.m-y1) * root.zoom;
-                    width: abs(bg.m-x1 - bg.m-x0) * root.zoom;
-                    height: abs(bg.m-y1 - bg.m-y0) * root.zoom;
-                    background: self.crossing ? #16a34a1a : #3b82f61a;
-                    border-width: 1px;
-                    border-color: self.crossing ? #16a34a : #3b82f6;
-                }
-
-                if root.connect-mode == 3 : Rectangle {
-                    // The wide band is the actual landing range: 36 screen px.
-                    for segment[i] in root.link-segments : Rectangle {
-                        x: root.pan-x + segment.x * root.zoom - 18px;
-                        y: root.pan-y + segment.y * root.zoom - 18px;
-                        width: segment.w * root.zoom + 36px;
-                        height: segment.h * root.zoom + 36px;
-                        border-radius: 18px;
-                        background: i == root.link-hover ? (segment.eligible ? #4ade8030 : #ef444430) : segment.eligible ? #3b82f610 : transparent;
                         Rectangle {
-                            x: segment.w == 0px ? (parent.width - self.width) / 2 : 18px;
-                            y: segment.h == 0px ? (parent.height - self.height) / 2 : 18px;
-                            width: max(segment.w * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
-                            height: max(segment.h * root.zoom, i == root.link-hover || segment.selected ? 8px : 5px);
-                            border-radius: 4px;
-                            background: segment.selected ? #9333ea : i == root.link-hover ? (segment.eligible ? #16a34a : #dc2626) : segment.eligible ? #3b82f680 : transparent;
+                            x: max(8px, (parent.width - self.width) / 2);
+                            y: 12px;
+                            width: min(640px, parent.width - 16px);
+                            height: 120px;
+                            background: #eff6ff;
+                            border-width: 2px;
+                            border-color: #3b82f6;
+                            border-radius: 8px;
+                            TouchArea { } // Keep banner clicks off the canvas.
+                            Text {
+                                x: 16px; y: 10px; height: 24px;
+                                text: root.link-step == 1 ? "Link middles · Step 1 of 2: choose the first segment" : "Link middles · Step 2 of 2: choose the second segment";
+                                font-weight: 700; color: #1e3a8a;
+                            }
+                            Text {
+                                x: 16px; y: 36px; width: parent.width - 32px; height: 28px;
+                                text: root.link-hint; font-size: 12px;
+                                color: root.link-hover >= 0 ? (root.link-segments[root.link-hover].eligible ? #15803d : #b91c1c) : #334155;
+                                wrap: word-wrap;
+                            }
+                            Text { x: 16px; y: 96px; text: "Blue: available   Purple: first selection   Green: ready to click"; font-size: 11px; color: #475569; }
+                            if root.link-step == 2 : Rectangle {
+                                x: parent.width - 154px; y: 68px; width: 62px; height: 25px;
+                                background: #dbeafe; border-radius: 4px;
+                                Text { text: "Back"; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.command("restart-link"); } }
+                            }
+                            Rectangle {
+                                x: parent.width - 84px; y: 68px; width: 72px; height: 25px;
+                                background: #dbeafe; border-radius: 4px;
+                                Text { text: "Cancel"; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.command("cancel-link"); } }
+                            }
                         }
                     }
-                    // Paint the hovered segment last so coincident candidates
-                    // cannot obscure which arrow the next click will choose.
-                    if root.link-hover >= 0 : Rectangle {
-                        property <LinkSegmentVm> segment: root.link-segments[root.link-hover];
-                        x: root.pan-x + self.segment.x * root.zoom - (self.segment.w == 0px ? 4px : 0px);
-                        y: root.pan-y + self.segment.y * root.zoom - (self.segment.h == 0px ? 4px : 0px);
-                        width: max(self.segment.w * root.zoom, 8px);
-                        height: max(self.segment.h * root.zoom, 8px);
-                        border-radius: 4px;
-                        background: self.segment.eligible ? #16a34a : #dc2626;
-                    }
-                    link-area := TouchArea {
-                        mouse-cursor: root.link-hover >= 0 && root.link-segments[root.link-hover].eligible ? pointer : not-allowed;
+
+                    // Space held: drag anywhere to pan, even over nodes and arrows.
+                    if root.space-pan : TouchArea {
+                        property <length> start-pan-x;
+                        property <length> start-pan-y;
+                        mouse-cursor: self.pressed ? grabbing : grab;
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                                 root.command("zoom-fit");
                             }
-                        }
-                        changed mouse-x => {
-                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
-                        }
-                        changed mouse-y => {
-                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
-                        }
-                        changed has-hover => {
-                            root.link-pointer((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom, self.has-hover);
-                        }
-                        clicked => {
-                            root.background-clicked((self.mouse-x - root.pan-x) / root.zoom, (self.mouse-y - root.pan-y) / root.zoom);
-                            keys.focus();
-                        }
-                        scroll-event(e) => {
-                            if (e.modifiers.control) {
-                                root.zoom-at(clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 1 / 1.1), 0.1, 8) / root.zoom, self.mouse-x, self.mouse-y);
-                            } else {
-                                root.pan-x += e.delta-x;
-                                root.pan-y += e.delta-y;
+                            if (e.kind == PointerEventKind.down) {
+                                self.start-pan-x = root.pan-x;
+                                self.start-pan-y = root.pan-y;
                             }
-                            root.link-pointer((self.mouse-x - root.pan-x)/root.zoom,(self.mouse-y - root.pan-y)/root.zoom,true);
-                            accept
                         }
-                    }
-                    Rectangle {
-                        x: max(8px, (parent.width - self.width) / 2);
-                        y: 12px;
-                        width: min(640px, parent.width - 16px);
-                        height: 120px;
-                        background: #eff6ff;
-                        border-width: 2px;
-                        border-color: #3b82f6;
-                        border-radius: 8px;
-                        TouchArea { } // Keep banner clicks off the canvas.
-                        Text {
-                            x: 16px; y: 10px; height: 24px;
-                            text: root.link-step == 1 ? "Link middles · Step 1 of 2: choose the first segment" : "Link middles · Step 2 of 2: choose the second segment";
-                            font-weight: 700; color: #1e3a8a;
-                        }
-                        Text {
-                            x: 16px; y: 36px; width: parent.width - 32px; height: 28px;
-                            text: root.link-hint; font-size: 12px;
-                            color: root.link-hover >= 0 ? (root.link-segments[root.link-hover].eligible ? #15803d : #b91c1c) : #334155;
-                            wrap: word-wrap;
-                        }
-                        Text { x: 16px; y: 96px; text: "Blue: available   Purple: first selection   Green: ready to click"; font-size: 11px; color: #475569; }
-                        if root.link-step == 2 : Rectangle {
-                            x: parent.width - 154px; y: 68px; width: 62px; height: 25px;
-                            background: #dbeafe; border-radius: 4px;
-                            Text { text: "Back"; horizontal-alignment: center; vertical-alignment: center; }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.command("restart-link"); } }
-                        }
-                        Rectangle {
-                            x: parent.width - 84px; y: 68px; width: 72px; height: 25px;
-                            background: #dbeafe; border-radius: 4px;
-                            Text { text: "Cancel"; horizontal-alignment: center; vertical-alignment: center; }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.command("cancel-link"); } }
-                        }
-                    }
-                }
-
-                // Space held: drag anywhere to pan, even over nodes and arrows.
-                if root.space-pan : TouchArea {
-                    property <length> start-pan-x;
-                    property <length> start-pan-y;
-                    mouse-cursor: self.pressed ? grabbing : grab;
-                    pointer-event(e) => {
-                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
-                            root.command("zoom-fit");
-                        }
-                        if (e.kind == PointerEventKind.down) {
-                            self.start-pan-x = root.pan-x;
-                            self.start-pan-y = root.pan-y;
-                        }
-                    }
-                    moved => {
-                        if (self.pressed) {
-                            root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
-                            root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                        moved => {
+                            if (self.pressed) {
+                                root.pan-x = self.start-pan-x + (self.mouse-x - self.pressed-x);
+                                root.pan-y = self.start-pan-y + (self.mouse-y - self.pressed-y);
+                            }
                         }
                     }
                 }

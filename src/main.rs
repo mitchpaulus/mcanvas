@@ -74,6 +74,17 @@ struct App {
     edge_model: Rc<VecModel<ColEdge>>,
     /// Column width (canvas px) at the start of a divider drag.
     col_resize_orig: Option<f64>,
+    /// Node copied with Ctrl+C, for pasting back onto a canvas.
+    copied: Option<Copied>,
+}
+
+/// A copied node. The system clipboard gets its Typst source (or its pixels,
+/// for an embedded image) so it also pastes into other apps; `stamp`
+/// fingerprints what the clipboard held right after the copy, and Ctrl+V pastes
+/// the node only while the clipboard still holds that.
+struct Copied {
+    node: Node,
+    stamp: u64,
 }
 
 /// Undo state: every page, plus the page the change was made on so that undo
@@ -837,10 +848,22 @@ impl App {
         i
     }
 
-    /// Paste the clipboard as a new node centered in the view: an image
-    /// (e.g. a screen snip) becomes an embedded image node, text becomes a
-    /// Typst node.
-    fn paste(&mut self, ui: &MainWindow) {
+    /// Canvas point under the mouse, if it is over the canvas.
+    fn pointer_pos(&self, ui: &MainWindow) -> Option<(f64, f64)> {
+        let z = ui.get_zoom() as f64;
+        ui.get_pointer_in().then(|| {
+            (
+                (ui.get_pointer_x() - ui.get_pan_x()) as f64 / z,
+                (ui.get_pointer_y() - ui.get_pan_y()) as f64 / z,
+            )
+        })
+    }
+
+    /// Paste the clipboard as a new node with its top-left corner at `at`, or
+    /// centered in the view: a node copied with Ctrl+C pastes as itself, an
+    /// image (e.g. a screen snip) becomes an embedded image node, text becomes
+    /// a Typst node.
+    fn paste(&mut self, ui: &MainWindow, at: Option<(f64, f64)>) {
         self.arrow_start = None;
         self.link_start = None;
         ui.set_connect_mode(0);
@@ -851,6 +874,10 @@ impl App {
                 return;
             }
         };
+        if self.copied.as_ref().is_some_and(|c| clipboard_stamp(&mut clip) == Some(c.stamp)) {
+            self.paste_node(ui, at);
+            return;
+        }
         let cx = ((ui.get_view_width() / 2.0 - ui.get_pan_x()) / ui.get_zoom()) as f64;
         let cy = ((ui.get_view_height() / 2.0 - ui.get_pan_y()) / ui.get_zoom()) as f64;
         if let Ok(img) = clip.get_image() {
@@ -867,12 +894,13 @@ impl App {
             let scale = ui.window().scale_factor().max(0.1) as f64;
             let width = self.doc.snap((w as f64 / scale).min(MAX_PASTE_WIDTH)).max(self.doc.grid.max(8.0));
             let height = width * h as f64 / w.max(1) as f64;
+            let (x, y) = at.unwrap_or((cx - width / 2.0, cy - height / 2.0));
             self.snapshot();
             self.push_node(Node {
                 id: doc::new_id(),
                 kind: "image".into(),
-                x: self.doc.snap(cx - width / 2.0),
-                y: self.doc.snap(cy - height / 2.0),
+                x: self.doc.snap(x),
+                y: self.doc.snap(y),
                 width,
                 height: None,
                 source: String::new(),
@@ -886,12 +914,13 @@ impl App {
                 self.message = "clipboard is empty".into();
                 return;
             }
+            let (x, y) = at.unwrap_or((cx - DEFAULT_WIDTH / 2.0, cy));
             self.snapshot();
             self.push_node(Node {
                 id: doc::new_id(),
                 kind: "typst".into(),
-                x: self.doc.snap(cx - DEFAULT_WIDTH / 2.0),
-                y: self.doc.snap(cy),
+                x: self.doc.snap(x),
+                y: self.doc.snap(y),
                 width: DEFAULT_WIDTH,
                 height: None,
                 source: text,
@@ -902,6 +931,54 @@ impl App {
             self.message = "pasted text".into();
         } else {
             self.message = "nothing to paste".into();
+        }
+    }
+
+    /// Paste a copy of the copied node with its top-left corner at `at`. Without
+    /// a point it goes down and right of where it was copied (or last pasted)
+    /// so repeated pastes cascade, or centered in the view when that spot is
+    /// off screen.
+    fn paste_node(&mut self, ui: &MainWindow, at: Option<(f64, f64)>) {
+        let z = ui.get_zoom() as f64;
+        let (pan_x, pan_y) = (ui.get_pan_x() as f64, ui.get_pan_y() as f64);
+        let (x0, y0) = (-pan_x / z, -pan_y / z);
+        let (x1, y1) = ((ui.get_view_width() as f64 - pan_x) / z, (ui.get_view_height() as f64 - pan_y) / z);
+        let step = if self.doc.grid > 0.0 { self.doc.grid * 3.0 } else { 24.0 };
+        let Some(c) = &mut self.copied else { return };
+        let mut node = c.node.clone();
+        node.id = doc::new_id();
+        let (x, y) = at.unwrap_or((node.x + step, node.y + step));
+        if at.is_some() || (x >= x0 && x < x1 && y >= y0 && y < y1) {
+            (node.x, node.y) = (x, y);
+        } else {
+            let h = node.height.unwrap_or(0.0);
+            (node.x, node.y) = ((x0 + x1 - node.width) / 2.0, (y0 + y1 - h) / 2.0);
+        }
+        node.x = self.doc.snap(node.x);
+        node.y = self.doc.snap(node.y);
+        (c.node.x, c.node.y) = (node.x, node.y);
+        self.snapshot();
+        self.push_node(node);
+        self.message = "pasted node".into();
+    }
+
+    fn copy_selected(&mut self) {
+        match self.selected {
+            Some(i) => self.copy_node(i),
+            None => self.message = "select a node to copy".into(),
+        }
+    }
+
+    /// Copy a node for pasting with Ctrl+V.
+    fn copy_node(&mut self, i: usize) {
+        let node = self.nodes()[i].clone();
+        let typst = self.node_as_typst(i);
+        match put_node_on_clipboard(&node, typst) {
+            Ok(stamp) => {
+                self.copied = Some(Copied { node, stamp });
+                self.message = "copied node".into();
+            }
+            Err(e) => self.message = format!("clipboard error: {e}"),
         }
     }
 
@@ -922,6 +999,7 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self, text: String) {
+        self.copied = None;
         match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
             Ok(()) => self.message = "copied as Typst".into(),
             Err(e) => self.message = format!("clipboard error: {e}"),
@@ -1237,6 +1315,41 @@ fn arrow_vm(points: &[arrows::Point], selected: bool, suspended: bool) -> ArrowV
 
 }
 
+/// Put a copied node on the system clipboard and return the clipboard's
+/// fingerprint afterwards. It is read back rather than computed from what was
+/// set, since the OS may convert the data on the way in.
+fn put_node_on_clipboard(node: &Node, typst: String) -> Result<u64, String> {
+    let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    match &node.data {
+        Some(data) => {
+            let img = picture::base64_to_rgba(data)?;
+            clip.set_image(arboard::ImageData {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                bytes: img.into_raw().into(),
+            })
+        }
+        None => clip.set_text(typst),
+    }
+    .map_err(|e| e.to_string())?;
+    clipboard_stamp(&mut clip).ok_or_else(|| "the clipboard did not keep the copy".into())
+}
+
+/// Hash of the clipboard contents, checked in the same order `paste` reads
+/// them: image first, then text.
+fn clipboard_stamp(clip: &mut arboard::Clipboard) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Ok(img) = clip.get_image() {
+        (img.width, img.height, &img.bytes[..]).hash(&mut h);
+    } else if let Ok(text) = clip.get_text() {
+        text.hash(&mut h);
+    } else {
+        return None;
+    }
+    Some(h.finish())
+}
+
 /// Update a model in place when the row count matches, otherwise replace it.
 /// In-place updates keep the repeated Slint elements (and any drag on them) alive.
 fn replace_rows<T: Clone + PartialEq + 'static>(model: &Rc<VecModel<T>>, rows: Vec<T>) {
@@ -1347,6 +1460,7 @@ fn main() {
         hover_row: Cell::new(None),
         also_selected: Vec::new(),
         collapse_on_release: None,
+        copied: None,
         drag_orig: Vec::new(),
         resize_orig: None,
         message: String::new(),
@@ -1591,6 +1705,13 @@ fn main() {
         a.open_editor(&u, i as usize);
     });
 
+    hook!(on_paste_at, |a, u, x, y| {
+        if u.get_edit_index() < 0 && u.get_table_edit_index() < 0 {
+            a.paste(&u, Some((x as f64, y as f64)));
+        }
+        u.invoke_focus_canvas();
+    });
+
     hook!(on_node_menu, |a, u, op, i| {
         let i = i as usize;
         if i >= a.nodes().len() {
@@ -1598,6 +1719,7 @@ fn main() {
         }
         match op.as_str() {
             "edit" => a.open_editor(&u, i),
+            "copy" => a.copy_node(i),
             "copy-typst" if a.nodes()[i].data.is_some() => {
                 a.message = "embedded image has no file path to reference in Typst".into();
             }
@@ -1721,7 +1843,14 @@ fn main() {
             // shortcuts fire before the focused widget, which would break
             // pasting text in the node and table editors.
             if !shift && (k == "v" || k == "V") {
-                a.paste(&u);
+                let at = a.pointer_pos(&u);
+                a.paste(&u, at);
+                return true;
+            }
+            // Ctrl+C likewise, so it copies text inside the editors.
+            let editing = u.get_edit_index() >= 0 || u.get_table_edit_index() >= 0;
+            if !shift && !editing && (k == "c" || k == "C") {
+                a.copy_selected();
                 return true;
             }
             return false;
@@ -1876,7 +2005,8 @@ fn main() {
                 a.open_editor(&u, i);
             }
             "delete" if !editing => a.delete_selected(),
-            "paste" if !editing => a.paste(&u),
+            "copy" if !editing => a.copy_selected(),
+            "paste" if !editing => a.paste(&u, None),
             "zoom-in" => zoom_step(&u, 1.25),
             "zoom-out" => zoom_step(&u, 0.8),
             "zoom-100" => {

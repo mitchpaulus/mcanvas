@@ -199,6 +199,23 @@ Working:
   canvas key handler, not declared on the menu, because Slint runs menu
   shortcuts before the focused widget and would swallow text paste in editors.
   "Copy as Typst" does nothing useful for embedded images (there is no path).
+- Copy node (2026-10-01): Ctrl+C on the selected node, right-click > Copy, or
+  Edit > Copy Node. The node is kept in the app, and the system clipboard gets
+  its Typst source (or its pixels, for an embedded image) so it pastes into
+  other apps too. Ctrl+V pastes the node itself only while the clipboard still
+  holds what was copied (a hash of the clipboard read back after the copy);
+  copying anything else in between makes Ctrl+V paste that instead. It works
+  across pages and files. Ctrl+C is in the canvas key handler for the same
+  reason as Ctrl+V.
+- Paste location: Ctrl+V puts the pasted node's top-left corner at the mouse
+  when the mouse is over the canvas; right-click on empty canvas > Paste here
+  does the same at the click. Otherwise (Edit > Paste, or the mouse off the
+  canvas) images and text go to the middle of the view, and a copied node goes
+  three grid steps down-right of the copied (or last pasted) one, or the middle
+  of the view if that spot is off screen. The mouse is tracked by a `pointer`
+  TouchArea wrapping the background and nodes: a TouchArea updates `mouse-x`
+  and `has-hover` before its children see the event, so it follows the mouse
+  over nodes too.
 
 - Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
   or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a
@@ -209,7 +226,8 @@ Working:
 
 Not yet:
 - Manual height (`height` is respected if set in JSON, but there is no UI for it).
-- Moving a node to another page (cut/paste or a "Move to page" menu).
+- Moving a node to another page (cut, or a "Move to page" menu; copy, paste,
+  delete works).
 - Off-thread rendering; compiles run on the UI thread and are fast enough so far.
 
 ## Arrows
