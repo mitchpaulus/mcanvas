@@ -64,6 +64,10 @@ struct App {
     /// Pre-drag positions of every node being dragged, the pressed one first.
     drag_orig: Vec<(usize, f64, f64)>,
     resize_orig: Option<f64>,
+    /// Node and width awaiting a live re-render during a resize drag. Pointer
+    /// moves that arrive while a render runs only update this, so they
+    /// collapse into one render of the latest width.
+    resize_pending: Option<(usize, f64)>,
     message: String,
     renderer: Renderer,
     model: Rc<VecModel<NodeVm>>,
@@ -340,12 +344,17 @@ impl App {
     }
 
     fn build_vm(&self, i: usize) -> NodeVm {
+        self.build_vm_at(i, self.nodes()[i].width)
+    }
+
+    /// The node's view model as if it were `width` wide.
+    fn build_vm_at(&self, i: usize, width: f64) -> NodeVm {
         let node = &self.nodes()[i];
         let mut vm = NodeVm {
             id: node.id.clone().into(),
             x: node.x as f32,
             y: node.y as f32,
-            w: node.width as f32,
+            w: width as f32,
             h: node.height.unwrap_or(40.0) as f32,
             img: Default::default(),
             error: SharedString::default(),
@@ -372,7 +381,7 @@ impl App {
                     Ok(img) => {
                         let size = img.size();
                         if node.height.is_none() && size.width > 0 {
-                            vm.h = (node.width * size.height as f64 / size.width as f64) as f32;
+                            vm.h = (width * size.height as f64 / size.width as f64) as f32;
                         }
                         vm.img = img;
                     }
@@ -383,21 +392,21 @@ impl App {
                 }
             }
             "table" => match &node.table {
-                Some(t) => self.render_typst(&mut vm, node, &t.to_typst()),
+                Some(t) => self.render_typst(&mut vm, node, &t.to_typst(), width),
                 None => {
                     vm.error = "table node has no \"table\" data".into();
                     vm.h = 60.0;
                 }
             },
-            _ => self.render_typst(&mut vm, node, &node.source),
+            _ => self.render_typst(&mut vm, node, &node.source, width),
         }
         vm
     }
 
-    fn render_typst(&self, vm: &mut NodeVm, node: &Node, source: &str) {
+    fn render_typst(&self, vm: &mut NodeVm, node: &Node, source: &str, width: f64) {
         match self
             .renderer
-            .render(&self.root_dir(), &self.doc.preamble, source, node.width)
+            .render(&self.root_dir(), &self.doc.preamble, source, width)
         {
             Ok(r) => {
                 match slint::Image::load_from_svg_data(r.svg.as_bytes()) {
@@ -1528,6 +1537,7 @@ fn main() {
         copied: None,
         drag_orig: Vec::new(),
         resize_orig: None,
+        resize_pending: None,
         message: String::new(),
         renderer: Renderer::new(),
         model,
@@ -1734,21 +1744,50 @@ fn main() {
         a.mark_dirty();
     });
 
-    hook!(on_node_resize, |a, _u, i, dw| {
-        let i = i as usize;
-        if a.resize_orig.is_none() {
-            a.resize_orig = Some(a.nodes()[i].width);
-        }
-        let ow = a.resize_orig.unwrap();
-        let w = (ow + dw as f64).max(40.0);
-        if let Some(mut vm) = a.model.row_data(i) {
-            vm.w = w as f32;
-            a.model.set_row_data(i, vm);
-        }
-    });
+    // Not a hook!: the deferred re-render needs its own handle on the app.
+    {
+        let app = app.clone();
+        let weak = ui.as_weak();
+        ui.on_node_resize(move |i, dw| {
+            let u = weak.unwrap();
+            let mut a = app.borrow_mut();
+            let i = i as usize;
+            if a.resize_orig.is_none() {
+                a.resize_orig = Some(a.nodes()[i].width);
+            }
+            let ow = a.resize_orig.unwrap();
+            let w = (ow + dw as f64).max(40.0);
+            if let Some(mut vm) = a.model.row_data(i) {
+                vm.w = w as f32;
+                a.model.set_row_data(i, vm);
+            }
+            // Images just scale; Typst and table nodes reflow at the new
+            // width once the queued pointer moves have been handled.
+            if a.nodes()[i].kind != "image" && a.resize_pending.replace((i, w)).is_none() {
+                let app = app.clone();
+                let weak = weak.clone();
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    let Some(u) = weak.upgrade() else { return };
+                    let mut a = app.borrow_mut();
+                    let Some((i, w)) = a.resize_pending.take() else { return };
+                    if a.resize_orig.is_none() {
+                        return;
+                    }
+                    let vm = a.build_vm_at(i, w);
+                    a.model.set_row_data(i, vm);
+                    a.refresh_arrows();
+                    a.refresh_link_ui(&u);
+                });
+            }
+            a.refresh_arrows();
+            a.refresh_link_ui(&u);
+            status(&a, &u);
+        });
+    }
 
     hook!(on_node_resize_end, |a, _u, i| {
         let i = i as usize;
+        a.resize_pending = None;
         if let Some(ow) = a.resize_orig.take() {
             let w = a
                 .model
