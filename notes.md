@@ -224,21 +224,38 @@ Working:
   `xdg-open` return at once, so there is no editor process to wait on. The source goes to `<temp>/mcanvas/<id>.typ`;
   a background thread polls it every 300 ms while the editor runs and every save
   updates the node (one undo step per save), with a final read when the editor
-  exits. The editor must wait for the file to be closed (`code --wait`,
-  `subl -w`, `gvim -f`); one that returns within 2 s without a save gets a
-  status-bar hint. Ctrl+E while typing in a node commits that text first. A
+  exits. A change is applied once two polls in a row read the same text, so a
+  half-written save is never applied. The editor should wait for the file to be
+  closed (`code --wait`, `subl -w`, `gvim -f`); one that returns within 2 s
+  without a save gets a status-bar hint and the file stays watched (saves still
+  apply) until stopped. Ctrl+E while typing in a node commits that text first. A
   node can be open in only one external editor at a time, and the canvas stays
-  usable meanwhile.
+  usable meanwhile. Ctrl+E on a node that is already open shows the editor, pid,
+  file and time open; Ctrl+E again within 5 s stops it (kills the editor, keeps
+  what was saved), so a hung or windowless editor never locks a node.
+  Status messages name the editor's full path, pid and temp file on open, and
+  the editor, pid, run time, exit status and number of saves applied on close.
+  The file may be UTF-8 (with or without BOM) or UTF-16 with a BOM. A file that
+  cannot be read or decoded for 3 s is reported; if the final read fails the
+  temp file is kept, and the message says so, instead of being deleted.
   On Windows, if the process lacks `MCANVAS_EDITOR` (it was set in Settings
   after mcanvas or its launching shell started), the saved user then machine
   value is read from the registry, so no restart is needed. The program is
   resolved by mcanvas itself (a path, or PATH plus PATHEXT on Windows) so the
-  status bar can say whether the variable is unset or empty, the program was
-  not found (and how many PATH folders were searched), or it was found but
-  failed to start or exited with an error; success shows the full path.
+  status bar can say whether the variable is unset or empty (and whether it came
+  from the environment or from user/system settings), the program was not
+  found (and how many PATH folders were searched), or it was found but failed
+  to start or exited with an error. The PATH saved in Windows settings (system
+  then user, `%VAR%`s expanded) is searched after mcanvas's own, for editors
+  installed after mcanvas started.
   Console editors (`nvim.exe`) get their own console window via
   `CREATE_NEW_CONSOLE`; `.cmd`/`.bat` launchers (`code.cmd`) run with
-  `CREATE_NO_WINDOW` so no stray console appears.
+  `CREATE_NO_WINDOW` so no stray console appears (the status says so, and the
+  pid is then cmd.exe's). Rust always passes the parent's std handles, so when
+  mcanvas is started from a shell a console editor would get the shell's
+  console or pipes instead of its new window; mcanvas clears its std handles
+  around that spawn so Windows hands the editor its own console (verified with
+  nvim from Explorer and from a shell with piped handles, 2026-10-22).
 
 - Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
   or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a

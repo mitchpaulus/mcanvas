@@ -8,7 +8,7 @@ mod render;
 mod table;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -78,8 +78,8 @@ struct App {
     col_resize_orig: Option<f64>,
     /// Node copied with Ctrl+C, for pasting back onto a canvas.
     copied: Option<Copied>,
-    /// Ids of nodes open in an external editor.
-    external: HashSet<String>,
+    /// Nodes open in an external editor, by id.
+    external: HashMap<String, external::Session>,
 }
 
 /// A copied node. The system clipboard gets its Typst source (or its pixels,
@@ -1037,18 +1037,31 @@ impl App {
             self.message = "only Typst nodes open in an external editor".into();
             return;
         }
-        if self.external.contains(&node.id) {
-            self.message = "this node is already open in an external editor".into();
+        let (id, source) = (node.id.clone(), node.source.clone());
+        if let Some(s) = self.external.get_mut(&id) {
+            // Say what is open, and stop it if asked again soon after: an
+            // editor that hung or opened no window would otherwise hold the
+            // node until mcanvas exits.
+            if s.asked.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+                s.stop();
+                s.asked = None;
+                self.message = format!("stopping {} (pid {})", s.name, s.pid);
+            } else {
+                s.asked = Some(Instant::now());
+                self.message = format!(
+                    "already open: {}; Edit in External Editor again within 5 s to stop it",
+                    s.describe()
+                );
+            }
             return;
         }
-        let argv = match external::editor_command() {
-            Ok(argv) => argv,
+        let editor = match external::editor_command() {
+            Ok(editor) => editor,
             Err(e) => {
                 self.message = e;
                 return;
             }
         };
-        let id = node.id.clone();
         let weak = ui.as_weak();
         let send = {
             let id = id.clone();
@@ -1056,15 +1069,15 @@ impl App {
                 let id = SharedString::from(id.as_str());
                 let _ = weak.upgrade_in_event_loop(move |ui| match event {
                     external::Event::Saved(text) => ui.invoke_external_edited(id, text.into()),
+                    external::Event::Note(note) => ui.invoke_external_note(note.into()),
                     external::Event::Closed(note) => ui.invoke_external_closed(id, note.into()),
                 });
             }
         };
-        match external::open(argv, &id, node.source.clone(), send) {
-            Ok(program) => {
-                self.external.insert(id);
-                self.message =
-                    format!("editing in {}; each save updates the node", program.display());
+        match external::open(editor, &id, source, send) {
+            Ok((session, message)) => {
+                self.external.insert(id, session);
+                self.message = message;
             }
             Err(e) => self.message = e,
         }
@@ -1524,7 +1537,7 @@ fn main() {
         cell_model,
         edge_model,
         col_resize_orig: None,
-        external: HashSet::new(),
+        external: HashMap::new(),
     }));
     {
         let a = app.borrow();
@@ -1889,12 +1902,19 @@ fn main() {
             }
         }
         a.mark_dirty();
-        a.message = "node updated from external editor".into();
+        a.message = match a.external.get(id.as_str()) {
+            Some(s) => format!("node updated from {} (pid {})", s.name, s.pid),
+            None => "node updated from external editor".into(),
+        };
+    });
+
+    hook!(on_external_note, |a, _u, note| {
+        a.message = note.into();
     });
 
     hook!(on_external_closed, |a, _u, id, note| {
         a.external.remove(id.as_str());
-        a.message = if note.is_empty() { "external editor closed".into() } else { note.into() };
+        a.message = note.into();
     });
 
     hook!(on_cancel_edit, |a, u| {

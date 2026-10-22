@@ -148,6 +148,8 @@ export component MainWindow inherits Window {
     // Text saved in, and exit of, an external editor for the node with this id.
     callback external-edited(string, string);
     callback external-closed(string, string);
+    // A problem or change of state while an external editor is open.
+    callback external-note(string);
     callback table-cell-edited(int, string);
     // Grid editor context menu: operation name and the cell it was opened on.
     callback table-op(string, int);
