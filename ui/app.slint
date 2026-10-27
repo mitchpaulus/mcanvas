@@ -84,7 +84,8 @@ component ToolButton inherits Rectangle {
 }
 
 export component MainWindow inherits Window {
-    title: "mcanvas";
+    in property <string> window-title: "mcanvas";
+    title: window-title;
     preferred-width: 1200px;
     preferred-height: 800px;
     forward-focus: keys;

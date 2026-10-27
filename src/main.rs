@@ -1461,6 +1461,14 @@ fn status(app: &App, ui: &MainWindow) {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "untitled".into());
     let dirty = if app.dirty { " [modified]" } else { "" };
+    let file_name = app
+        .path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let star = if app.dirty { "*" } else { "" };
+    ui.set_window_title(format!("{file_name}{star} - mcanvas").into());
     let mut left = format!("{name}{dirty}");
     if !app.also_selected.is_empty() {
         left.push_str(&format!("    {} nodes selected", app.also_selected.len() + 1));
