@@ -14,6 +14,16 @@ export struct ArrowVm {
     hovered: bool,
 }
 
+// A clickable URL link inside a rendered node, in canvas units relative to
+// the node's top-left corner. target is what the hover shows (the decoded path
+// for file links); blocked is why a click will not open it, or empty.
+export struct LinkVm {
+    x: float, y: float, w: float, h: float,
+    url: string,
+    target: string,
+    blocked: string,
+}
+
 export struct NodeVm {
     id: string,
     x: length,
@@ -25,6 +35,7 @@ export struct NodeVm {
     selected: bool,
     // Inside the selection rectangle being dragged.
     marquee: bool,
+    links: [LinkVm],
 }
 
 // One cell of the table grid editor. r is the grid row (after span
@@ -131,6 +142,15 @@ export component MainWindow inherits Window {
     callback node-resize(int, length);
     callback node-resize-end(int);
     callback node-edit-request(int);
+    // Index into node i's links of the one at node-local canvas point (x, y), or -1.
+    pure callback link-at(int, float, float) -> int;
+    // Link hover tooltip: the node whose link is hovered (-1 for none) and
+    // that link's target and blocked reason.
+    in-out property <int> link-tip-node: -1;
+    in-out property <string> link-tip-target;
+    in-out property <string> link-tip-blocked;
+    // Plain click (no drag) at node-local canvas point (x, y).
+    callback node-link-click(int, float, float);
     // Node context menu: "edit", "copy", "copy-typst", "delete".
     callback node-menu(string, int);
     callback background-clicked(length, length);
@@ -520,6 +540,24 @@ export component MainWindow inherits Window {
                         body := TouchArea {
                             property <length> start-x;
                             property <length> start-y;
+                            // The pointer moved far enough since the press to be a drag.
+                            property <bool> dragged;
+                            property <int> hover-link: n.links.length > 0 && self.has-hover
+                                ? root.link-at(i, self.mouse-x / root.zoom / 1px, self.mouse-y / root.zoom / 1px)
+                                : -1;
+                            property <bool> show-tip: self.hover-link >= 0 && !self.pressed;
+                            mouse-cursor: self.hover-link >= 0 ? pointer : default;
+                            function update-tip() {
+                                if (self.show-tip) {
+                                    root.link-tip-node = i;
+                                    root.link-tip-target = n.links[self.hover-link].target;
+                                    root.link-tip-blocked = n.links[self.hover-link].blocked;
+                                } else if (root.link-tip-node == i) {
+                                    root.link-tip-node = -1;
+                                }
+                            }
+                            changed hover-link => { self.update-tip(); }
+                            changed show-tip => { self.update-tip(); }
                             pointer-event(e) => {
                                 if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                                     root.command("zoom-fit");
@@ -530,14 +568,23 @@ export component MainWindow inherits Window {
                                 if (e.kind == PointerEventKind.down) {
                                     self.start-x = node.x + self.mouse-x;
                                     self.start-y = node.y + self.mouse-y;
+                                    self.dragged = false;
                                     root.node-pressed(i, e.modifiers.control);
                                     keys.focus();
                                 }
                                 if (e.kind == PointerEventKind.up) {
                                     root.node-drag-end(i);
+                                    // Ctrl+click toggles selection, so only a plain click follows a link.
+                                    if (!self.dragged && !e.modifiers.control && n.links.length > 0) {
+                                        root.node-link-click(i, self.mouse-x / root.zoom / 1px, self.mouse-y / root.zoom / 1px);
+                                    }
                                 }
                             }
                             moved => {
+                                if (self.pressed && !self.dragged) {
+                                    self.dragged = abs(node.x + self.mouse-x - self.start-x) > 3px
+                                        || abs(node.y + self.mouse-y - self.start-y) > 3px;
+                                }
                                 if (self.pressed) {
                                     root.node-drag(i,
                                         (node.x + self.mouse-x - self.start-x) / root.zoom,
@@ -726,6 +773,38 @@ export component MainWindow inherits Window {
                                 background: #dbeafe; border-radius: 4px;
                                 Text { text: "Cancel"; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.command("cancel-link"); } }
+                            }
+                        }
+                    }
+
+                    // Hovered link's real target, so link text cannot disguise
+                    // where a click goes. Drawn here because nodes clip.
+                    if root.link-tip-node >= 0 && root.pointer-in && !root.space-pan : Rectangle {
+                        property <length> max-w: min(520px, root.view-width - 8px);
+                        width: min(self.max-w, max(measure-target.preferred-width, measure-blocked.preferred-width) + 12px);
+                        height: tip-layout.preferred-height;
+                        x: max(4px, min(root.pointer-x + 14px, root.view-width - self.width - 4px));
+                        y: root.pointer-y + 22px + self.height > root.view-height
+                            ? max(4px, root.pointer-y - self.height - 8px)
+                            : root.pointer-y + 22px;
+                        background: #1f2937f0;
+                        border-radius: 4px;
+                        measure-target := Text { visible: false; text: root.link-tip-target; font-size: 12px; }
+                        measure-blocked := Text { visible: false; text: root.link-tip-blocked; font-size: 12px; }
+                        tip-layout := VerticalLayout {
+                            padding: 6px;
+                            spacing: 2px;
+                            Text {
+                                text: root.link-tip-target;
+                                color: white;
+                                font-size: 12px;
+                                wrap: char-wrap;
+                            }
+                            if root.link-tip-blocked != "" : Text {
+                                text: root.link-tip-blocked;
+                                color: #fca5a5;
+                                font-size: 12px;
+                                wrap: word-wrap;
                             }
                         }
                     }

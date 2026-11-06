@@ -4,6 +4,8 @@ use std::sync::Mutex;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
+use typst::layout::{Frame, FrameItem, Point, Transform};
+use typst::model::Destination;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -23,7 +25,24 @@ pub struct Rendered {
     pub svg: String,
     pub width: f64,
     pub height: f64,
+    /// External (URL) links, in logical pixels from the top-left of the page.
+    pub links: Vec<LinkRect>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub url: String,
+}
+
+/// Styles URL links like a browser: blue and underlined. Internal links
+/// (to labels or positions) keep their normal look. It comes before the canvas
+/// preamble so a canvas can restyle links with its own `show link` rule.
+const LINK_STYLE: &str = "#show link: it => if type(it.dest) == str {\n  \
+     set text(fill: rgb(\"#0b57d0\"))\n  underline(it)\n} else { it }\n";
 
 impl Renderer {
     pub fn new() -> Self {
@@ -49,7 +68,7 @@ impl Renderer {
         let margin_pt = 8.0 * PT_PER_PX;
         let prefix = format!(
             "#set page(width: {width_pt}pt, height: auto, margin: {margin_pt}pt, fill: none)\n\
-             #set text(size: 12pt)\n{preamble}\n"
+             #set text(size: 12pt)\n{LINK_STYLE}{preamble}\n"
         );
         let prefix_lines = prefix.matches('\n').count();
         let text = format!("{prefix}{source}\n");
@@ -72,8 +91,11 @@ impl Renderer {
                     .first()
                     .ok_or_else(|| "no pages produced".to_string())?;
                 let svg = typst_svg::svg(page, &typst_svg::SvgOptions::default());
+                let mut links = Vec::new();
+                collect_links(&page.frame, Transform::identity(), &mut links);
                 Ok(Rendered {
                     svg,
+                    links,
                     width: page.frame.width().to_pt() / PT_PER_PX,
                     height: page.frame.height().to_pt() / PT_PER_PX,
                 })
@@ -93,6 +115,40 @@ impl Renderer {
                     .collect();
                 Err(msgs.join("\n"))
             }
+        }
+    }
+}
+
+/// Walk the frame tree and record the bounding box of every URL link,
+/// converted from points to logical pixels.
+fn collect_links(frame: &Frame, ts: Transform, out: &mut Vec<LinkRect>) {
+    for (pos, item) in frame.items() {
+        let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+        match item {
+            FrameItem::Group(group) => {
+                collect_links(&group.frame, ts.pre_concat(group.transform), out);
+            }
+            FrameItem::Link(Destination::Url(url), size) => {
+                let corners = [
+                    Point::zero(),
+                    Point::with_x(size.x),
+                    Point::with_y(size.y),
+                    Point::new(size.x, size.y),
+                ]
+                .map(|p| p.transform(ts));
+                let xs = corners.map(|p| p.x.to_pt());
+                let ys = corners.map(|p| p.y.to_pt());
+                let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+                let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+                out.push(LinkRect {
+                    x: min(xs) / PT_PER_PX,
+                    y: min(ys) / PT_PER_PX,
+                    w: (max(xs) - min(xs)) / PT_PER_PX,
+                    h: (max(ys) - min(ys)) / PT_PER_PX,
+                    url: url.to_string(),
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -186,6 +242,28 @@ mod tests {
         assert_ne!(with.svg, without.svg);
         let err = r.render(root, "#set raw(syntaxes: \"nope.sublime-syntax\")", code, 300.0).unwrap_err();
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn finds_url_links() {
+        let r = Renderer::new();
+        let out = r
+            .render(
+                Path::new("."),
+                "",
+                "Intro line\n\nSee https://example.com and #link(\"https://typst.app\")[Typst].\n\n= Head <h>\n#link(<h>)[internal]",
+                400.0,
+            )
+            .unwrap();
+        let urls: Vec<&str> = out.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(urls, ["https://example.com", "https://typst.app"]);
+        for l in &out.links {
+            assert!(l.w > 10.0 && l.h > 5.0, "{l:?}");
+            assert!(l.y > 10.0 && l.y + l.h < out.height, "{l:?}");
+            assert!(l.x >= 0.0 && l.x + l.w <= out.width, "{l:?}");
+        }
+        // Styled blue (#0b57d0) in the SVG.
+        assert!(out.svg.to_lowercase().contains("#0b57d0"), "link color missing");
     }
 
     #[test]

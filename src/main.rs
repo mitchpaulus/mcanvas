@@ -3,6 +3,7 @@
 mod arrows;
 mod doc;
 mod external;
+mod links;
 mod picture;
 mod render;
 mod table;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Model, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use doc::{Arrow, Canvas, Node, Page, Routing, Side};
 use render::Renderer;
@@ -84,6 +85,9 @@ struct App {
     copied: Option<Copied>,
     /// Nodes open in an external editor, by id.
     external: HashMap<String, external::Session>,
+    /// Last link opened and when, so the two clicks of a double-click (which
+    /// also opens the editor) launch the browser only once.
+    last_link_open: Option<(String, Instant)>,
 }
 
 /// A copied node. The system clipboard gets its Typst source (or its pixels,
@@ -141,6 +145,27 @@ fn remember_dir(path: &std::path::Path) {
 }
 
 impl App {
+    /// Open a clicked link in the system browser (or mail client).
+    fn open_link(&mut self, url: &str) {
+        if let Some((last, at)) = &self.last_link_open {
+            if last == url && at.elapsed() < Duration::from_millis(800) {
+                return;
+            }
+        }
+        self.last_link_open = Some((url.to_string(), Instant::now()));
+        let target = links::classify(url).and_then(|t| match t {
+            links::Target::Web(u) => Ok(std::ffi::OsString::from(u)),
+            links::Target::File(p) => links::check_file(&p).map(|()| p.into_os_string()),
+        });
+        self.message = match target {
+            Ok(t) => match open::that_detached(&t) {
+                Ok(()) => format!("Opened {}", t.to_string_lossy()),
+                Err(e) => format!("Cannot open {}: {e}", t.to_string_lossy()),
+            },
+            Err(why) => format!("Not opening link: {why}"),
+        };
+    }
+
     fn arrow_routes(&self) -> Vec<(usize, arrows::Route)> {
         let rect = |id: &str| {
             self.model
@@ -360,6 +385,7 @@ impl App {
             error: SharedString::default(),
             selected: self.is_selected(i),
             marquee: false,
+            links: ModelRc::default(),
         };
         match node.kind.as_str() {
             "image" => {
@@ -415,6 +441,29 @@ impl App {
                 }
                 if node.height.is_none() {
                     vm.h = r.height.max(24.0) as f32;
+                }
+                // The image is stretched to fill the node, so scale the link
+                // boxes the same way.
+                let sx = if r.width > 0.0 { vm.w as f64 / r.width } else { 1.0 };
+                let sy = if r.height > 0.0 { vm.h as f64 / r.height } else { 1.0 };
+                let links: Vec<LinkVm> = r
+                    .links
+                    .iter()
+                    .map(|l| {
+                        let (target, blocked) = links::describe(&l.url);
+                        LinkVm {
+                            x: (l.x * sx) as f32,
+                            y: (l.y * sy) as f32,
+                            w: (l.w * sx) as f32,
+                            h: (l.h * sy) as f32,
+                            url: l.url.as_str().into(),
+                            target: target.into(),
+                            blocked: blocked.into(),
+                        }
+                    })
+                    .collect();
+                if !links.is_empty() {
+                    vm.links = ModelRc::new(VecModel::from(links));
                 }
             }
             Err(e) => {
@@ -1454,6 +1503,16 @@ fn parse_hex(s: &str) -> Option<slint::Color> {
     Some(slint::Color::from_argb_u8(a, r, g, b))
 }
 
+/// Index into node `i`'s links of the one at node-local canvas point (x, y).
+fn link_at(ui: &MainWindow, i: i32, x: f32, y: f32) -> Option<usize> {
+    let vm = ui.get_nodes().row_data(usize::try_from(i).ok()?)?;
+    let hit = vm
+        .links
+        .iter()
+        .position(|l| x >= l.x && x <= l.x + l.w && y >= l.y && y <= l.y + l.h);
+    hit
+}
+
 fn status(app: &App, ui: &MainWindow) {
     let name = app
         .path
@@ -1547,6 +1606,7 @@ fn main() {
         resize_orig: None,
         resize_pending: None,
         message: String::new(),
+        last_link_open: None,
         renderer: Renderer::new(),
         model,
         tab_model,
@@ -1709,6 +1769,24 @@ fn main() {
             .into_iter()
             .map(|j| (j, a.nodes()[j].x, a.nodes()[j].y))
             .collect();
+    });
+
+    // Pure: reads only the node model, never the App, so it is safe to call
+    // from binding evaluation while the App is borrowed.
+    {
+        let weak = ui.as_weak();
+        ui.on_link_at(move |i, x, y| {
+            let Some(ui) = weak.upgrade() else { return -1; };
+            link_at(&ui, i, x, y).map_or(-1, |k| k as i32)
+        });
+    }
+
+    hook!(on_node_link_click, |a, u, i, x, y| {
+        let Some(k) = link_at(&u, i, x, y) else { return; };
+        let Some(link) = u.get_nodes().row_data(i as usize).and_then(|n| n.links.row_data(k)) else {
+            return;
+        };
+        a.open_link(&link.url);
     });
 
     hook!(on_node_drag, |a, _u, _i, dx, dy| {

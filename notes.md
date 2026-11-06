@@ -257,6 +257,31 @@ Working:
   around that spawn so Windows hands the editor its own console (verified with
   nvim from Explorer and from a shell with piped handles, 2026-10-22).
 
+- Links (2026-11-06): URL links (`https://...` typed in markup, or
+  `#link("url")[text]`) render blue (#0b57d0) and underlined; internal links to
+  labels keep their normal look. The rule sits before the canvas preamble, so a
+  `show link` rule there overrides it. The renderer collects each URL link's box
+  from the laid-out frame, and in view mode the pointer becomes a hand over it.
+  A plain click on a link (no drag, no Ctrl) selects the node and opens it
+  with the OS default handler; Ctrl+click still toggles selection and dragging
+  from a link still moves the node. Double-click opens the link once (repeat
+  clicks on the same URL within 800 ms are ignored) and still opens the editor.
+  Hovering a link shows its real target in a tooltip (the decoded path for file
+  links), plus the reason in red if it will not open, so link text cannot
+  disguise where a click goes. What opens (`src/links.rs`): `http`, `https`,
+  `mailto`, and `file:` links to a local path (`file:///path` or
+  `file://localhost/path`). Refused: other schemes; `file:` links with any other
+  host or a UNC path (on Windows these connect to an SMB share and can send the
+  user's NTLM hash); paths with a colon past the drive letter (NTFS alternate
+  streams); and file types that run, install, mount, or redirect (executables,
+  scripts, shortcuts, installers, disk images, `.app` bundles; see
+  `BLOCKED_EXTENSIONS`). Trailing dots, spaces and slashes are ignored when
+  reading the extension, as Windows does. On click the file itself is checked
+  too: it must exist, symlinks are judged by their target, and files with no
+  extension or (on Unix) an execute bit are refused. Directories open in the
+  file manager. The blocklist cannot be complete, which is why the tooltip
+  exists.
+
 - Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
   or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a
   new page, Ctrl+PgUp/PgDn to cycle. Each page restores its own viewport. Page
