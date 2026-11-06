@@ -4,10 +4,10 @@ use std::sync::Mutex;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
-use typst::layout::{Frame, FrameItem, Point, Transform};
+use typst::layout::{Abs, Frame, FrameItem, Point, Transform};
 use typst::model::Destination;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, TextItem};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_kit::fonts::FontStore;
@@ -27,6 +27,69 @@ pub struct Rendered {
     pub height: f64,
     /// External (URL) links, in logical pixels from the top-left of the page.
     pub links: Vec<LinkRect>,
+    /// The visible text and where each glyph sits, for search highlights.
+    pub text: TextLayout,
+}
+
+/// Plain text of a rendered page with the box of every glyph. Text runs that
+/// do not continue each other on the same line are separated by a newline so
+/// that a search term never matches across them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextLayout {
+    pub text: String,
+    pub glyphs: Vec<GlyphBox>,
+}
+
+/// A glyph's byte range in `TextLayout::text` and its box in logical pixels.
+/// Kept for every rendered node, so compact: 24 bytes rather than 48 with
+/// `usize` and `f64` (`f32` is what the highlight boxes end up as anyway).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphBox {
+    pub start: u32,
+    pub end: u32,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl TextLayout {
+    /// Append to `out` the boxes covering bytes `start..end` of the text, one
+    /// per line it spans.
+    pub fn boxes(&self, start: usize, end: usize, out: &mut Vec<(f32, f32, f32, f32)>) {
+        let (start, end) = (start as u32, end as u32);
+        let base = out.len();
+        // Glyphs are pushed in text order (`TextCollector` appends each
+        // glyph's chars to the text), so both `start` and `end` are sorted.
+        let first = self.glyphs.partition_point(|g| g.end <= start);
+        for g in self.glyphs[first..].iter().take_while(|g| g.start < end) {
+            let n = out.len();
+            match out.last_mut().filter(|_| n > base) {
+                // Same line: grow the box.
+                Some(b) if (g.y - b.1).abs() < b.3.min(g.h) / 2.0 => {
+                    let x0 = b.0.min(g.x);
+                    let y0 = b.1.min(g.y);
+                    b.2 = (b.0 + b.2).max(g.x + g.w) - x0;
+                    b.3 = (b.1 + b.3).max(g.y + g.h) - y0;
+                    b.0 = x0;
+                    b.1 = y0;
+                }
+                _ => out.push((g.x, g.y, g.w, g.h)),
+            }
+        }
+    }
+
+    /// The same layout with every box scaled.
+    pub fn scaled(mut self, sx: f64, sy: f64) -> TextLayout {
+        let (sx, sy) = (sx as f32, sy as f32);
+        for g in &mut self.glyphs {
+            g.x *= sx;
+            g.w *= sx;
+            g.y *= sy;
+            g.h *= sy;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,9 +156,17 @@ impl Renderer {
                 let svg = typst_svg::svg(page, &typst_svg::SvgOptions::default());
                 let mut links = Vec::new();
                 collect_links(&page.frame, Transform::identity(), &mut links);
+                let mut text = TextCollector::default();
+                text.collect(&page.frame, Transform::identity());
+                // The layout is cached for every node; drop the spare
+                // capacity left by growth (up to half of it).
+                let mut layout = text.layout;
+                layout.text.shrink_to_fit();
+                layout.glyphs.shrink_to_fit();
                 Ok(Rendered {
                     svg,
                     links,
+                    text: layout,
                     width: page.frame.width().to_pt() / PT_PER_PX,
                     height: page.frame.height().to_pt() / PT_PER_PX,
                 })
@@ -150,6 +221,91 @@ fn collect_links(frame: &Frame, ts: Transform, out: &mut Vec<LinkRect>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Bounding box in logical pixels of a rectangle in frame points under `ts`.
+fn px_box(ts: Transform, x0: Abs, y0: Abs, x1: Abs, y1: Abs) -> (f64, f64, f64, f64) {
+    let corners = [Point::new(x0, y0), Point::new(x1, y0), Point::new(x0, y1), Point::new(x1, y1)]
+        .map(|p| p.transform(ts));
+    let xs = corners.map(|p| p.x.to_pt());
+    let ys = corners.map(|p| p.y.to_pt());
+    let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+    let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    (
+        min(xs) / PT_PER_PX,
+        min(ys) / PT_PER_PX,
+        (max(xs) - min(xs)) / PT_PER_PX,
+        (max(ys) - min(ys)) / PT_PER_PX,
+    )
+}
+
+#[derive(Default)]
+struct TextCollector {
+    layout: TextLayout,
+    /// Where the previous text run ended: baseline point (page coordinates,
+    /// points) and font size, to tell whether the next run continues it.
+    last_end: Option<(f64, f64, f64)>,
+}
+
+impl TextCollector {
+    fn collect(&mut self, frame: &Frame, ts: Transform) {
+        for (pos, item) in frame.items() {
+            let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+            match item {
+                FrameItem::Group(group) => self.collect(&group.frame, ts.pre_concat(group.transform)),
+                FrameItem::Text(t) => self.text(t, ts),
+                _ => {}
+            }
+        }
+    }
+
+    /// Add one run of shaped text whose baseline starts at the origin of `ts`.
+    fn text(&mut self, item: &TextItem, ts: Transform) {
+        let size = item.size;
+        let metrics = item.font.metrics();
+        let top = -metrics.ascender.at(size);
+        let bottom = metrics.descender.at(size).abs();
+        let origin = Point::zero().transform(ts);
+        let continues = self.last_end.is_some_and(|(x, y, s)| {
+            let tol = 0.3 * s.max(size.to_pt());
+            (origin.y.to_pt() - y).abs() < 0.5 && (origin.x.to_pt() - x).abs() < tol
+        });
+        if !continues && !self.layout.text.is_empty() {
+            self.layout.text.push('\n');
+        }
+        let mut cursor = Abs::zero();
+        let mut prev: Option<std::ops::Range<usize>> = None;
+        for g in &item.glyphs {
+            let x0 = cursor + g.x_offset.at(size);
+            let x1 = x0 + g.x_advance.at(size);
+            let dy = -g.y_offset.at(size);
+            let (x, y, w, h) = px_box(ts, x0, top + dy, x1, bottom + dy);
+            let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
+            cursor += g.x_advance.at(size);
+            let range = g.range();
+            // Several glyphs for one cluster (combining marks): widen the box.
+            if prev.as_ref() == Some(&range) {
+                if let Some(last) = self.layout.glyphs.last_mut() {
+                    let right = (last.x + last.w).max(x + w);
+                    last.x = last.x.min(x);
+                    last.w = right - last.x;
+                }
+                continue;
+            }
+            let Some(chars) = item.text.get(range.clone()) else { continue };
+            if chars.is_empty() {
+                continue;
+            }
+            // A node's rendered text is far below 4 GiB, so u32 offsets fit.
+            let start = self.layout.text.len() as u32;
+            self.layout.text.push_str(chars);
+            let end = self.layout.text.len() as u32;
+            self.layout.glyphs.push(GlyphBox { start, end, x, y, w, h });
+            prev = Some(range);
+        }
+        let end = Point::with_x(cursor).transform(ts);
+        self.last_end = Some((end.x.to_pt(), end.y.to_pt(), size.to_pt()));
     }
 }
 
@@ -264,6 +420,37 @@ mod tests {
         }
         // Styled blue (#0b57d0) in the SVG.
         assert!(out.svg.to_lowercase().contains("#0b57d0"), "link color missing");
+    }
+
+    #[test]
+    fn collects_text_with_glyph_boxes() {
+        let r = Renderer::new();
+        let out = r
+            .render(Path::new("."), "", "First line here\n\nHello *bold* world, again", 400.0)
+            .unwrap();
+        let t = &out.text;
+        // Style changes continue a run; separate paragraphs do not.
+        assert!(t.text.contains("Hello bold world"), "{:?}", t.text);
+        assert!(!t.text.contains("hereHello"), "{:?}", t.text);
+        let s = t.text.find("bold").unwrap();
+        let mut boxes = Vec::new();
+        t.boxes(s, s + 4, &mut boxes);
+        assert_eq!(boxes.len(), 1, "{boxes:?}");
+        let (x, y, w, h) = boxes[0];
+        assert!(x > 20.0 && w > 15.0 && w < 60.0, "{boxes:?}");
+        assert!(h > 8.0 && h < 30.0, "{boxes:?}");
+        // Below the first line, inside the page.
+        let mut first = Vec::new();
+        t.boxes(0, 5, &mut first);
+        let first = first[0];
+        assert!(y > first.1 + first.3 - 1.0 && ((y + h) as f64) < out.height, "{boxes:?} {first:?}");
+        assert!(((x + w) as f64) < out.width);
+        // Appending a second match on the same line adds its own box rather
+        // than growing the first one.
+        let wd = t.text.find("world").unwrap();
+        t.boxes(wd, wd + 5, &mut boxes);
+        assert_eq!(boxes.len(), 2, "{boxes:?}");
+        assert!(boxes[1].0 > x + w, "{boxes:?}");
     }
 
     #[test]

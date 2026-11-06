@@ -6,6 +6,7 @@ mod external;
 mod links;
 mod picture;
 mod render;
+mod search;
 mod table;
 
 use std::cell::{Cell, RefCell};
@@ -88,6 +89,30 @@ struct App {
     /// Last link opened and when, so the two clicks of a double-click (which
     /// also opens the editor) launch the browser only once.
     last_link_open: Option<(String, Instant)>,
+    /// Bumped whenever the document changes (every undo snapshot, undo,
+    /// redo, and load), so search results know when they are stale.
+    rev: u64,
+    search: Search,
+    search_model: Rc<VecModel<SearchHitVm>>,
+    /// Rendered text and glyph boxes of each Typst or table node, by id, in
+    /// canvas units relative to the node, for search highlights.
+    texts: RefCell<HashMap<String, Rc<render::TextLayout>>>,
+}
+
+/// Find bar state. Hits are kept while the bar is open and re-run when the
+/// document changes.
+#[derive(Default)]
+struct Search {
+    open: bool,
+    query: String,
+    hits: Vec<search::Hit>,
+    /// Index into `hits` by node id, so highlighting every node on a page
+    /// is not rows x hits.
+    by_node: HashMap<String, usize>,
+    /// Hit last jumped to.
+    current: Option<usize>,
+    /// `App::rev` the hits were computed at.
+    rev: u64,
 }
 
 /// A copied node. The system clipboard gets its Typst source (or its pixels,
@@ -385,7 +410,9 @@ impl App {
             error: SharedString::default(),
             selected: self.is_selected(i),
             marquee: false,
+            found: self.search_flag(&node.id),
             links: ModelRc::default(),
+            marks: ModelRc::default(),
         };
         match node.kind.as_str() {
             "image" => {
@@ -426,6 +453,10 @@ impl App {
             },
             _ => self.render_typst(&mut vm, node, &node.source, width),
         }
+        let marks = self.search_marks(&node.id, vm.found);
+        if !marks.is_empty() {
+            vm.marks = ModelRc::new(VecModel::from(marks));
+        }
         vm
     }
 
@@ -446,6 +477,9 @@ impl App {
                 // boxes the same way.
                 let sx = if r.width > 0.0 { vm.w as f64 / r.width } else { 1.0 };
                 let sy = if r.height > 0.0 { vm.h as f64 / r.height } else { 1.0 };
+                self.texts
+                    .borrow_mut()
+                    .insert(node.id.clone(), Rc::new(r.text.scaled(sx, sy)));
                 let links: Vec<LinkVm> = r
                     .links
                     .iter()
@@ -584,6 +618,7 @@ impl App {
     }
 
     fn snapshot(&mut self) {
+        self.rev += 1;
         self.undo.push(Snapshot { pages: self.doc.pages.clone(), active: self.active });
         if self.undo.len() > 200 {
             self.undo.remove(0);
@@ -614,6 +649,9 @@ impl App {
 
     /// Replace the document and reset all editing state.
     fn load_doc(&mut self, doc: Canvas, path: Option<PathBuf>, ui: &MainWindow) {
+        self.rev += 1;
+        self.search.current = None;
+        self.texts.borrow_mut().clear();
         self.active = doc.start_page();
         self.doc = doc;
         ui.set_connect_mode(0);
@@ -1309,6 +1347,7 @@ impl App {
     /// same page so stepping back again returns there. Viewports are not part
     /// of the history, so each page keeps its current one.
     fn restore(&mut self, ui: &MainWindow, snap: Snapshot) -> Snapshot {
+        self.rev += 1;
         self.store_view(ui);
         let pages = std::mem::replace(&mut self.doc.pages, snap.pages);
         for page in &mut self.doc.pages {
@@ -1327,6 +1366,199 @@ impl App {
         self.refresh_tabs();
         self.mark_dirty();
         Snapshot { pages, active: self.active }
+    }
+
+    /// Search highlight for the node with this id on the active page:
+    /// 0 none, 1 a hit, 2 the hit last jumped to.
+    fn search_flag(&self, id: &str) -> i32 {
+        let s = &self.search;
+        match s.by_node.get(id) {
+            Some(&k) if s.hits[k].page != self.active => 0,
+            Some(&k) if s.current == Some(k) => 2,
+            Some(_) => 1,
+            None => 0,
+        }
+    }
+
+    /// Highlight boxes for every occurrence of the query's terms in the
+    /// rendered text of a node that is a search hit (`found` > 0).
+    fn search_marks(&self, id: &str, found: i32) -> Vec<MarkVm> {
+        if found == 0 {
+            return Vec::new();
+        }
+        let texts = self.texts.borrow();
+        let Some(layout) = texts.get(id) else { return Vec::new() };
+        let mut boxes = Vec::new();
+        for (a, b) in search::find_all(&layout.text, &self.search.query) {
+            layout.boxes(a, b, &mut boxes);
+        }
+        boxes.into_iter().map(|(x, y, w, h)| MarkVm { x, y, w, h }).collect()
+    }
+
+    fn update_search_flags(&self) {
+        for i in 0..self.model.row_count() {
+            if let Some(mut vm) = self.model.row_data(i) {
+                let found = self.search_flag(&vm.id);
+                let marks = self.search_marks(&vm.id, found);
+                let same_marks = vm.marks.row_count() == marks.len()
+                    && vm.marks.iter().zip(&marks).all(|(a, b)| a == *b);
+                if vm.found != found || !same_marks {
+                    vm.found = found;
+                    vm.marks = if marks.is_empty() {
+                        ModelRc::default()
+                    } else {
+                        ModelRc::new(VecModel::from(marks))
+                    };
+                    self.model.set_row_data(i, vm);
+                }
+            }
+        }
+    }
+
+    /// Recompute the hits for the current query, keeping the current hit if
+    /// its node still matches.
+    fn run_search(&mut self, ui: &MainWindow) {
+        let s = &mut self.search;
+        let cur_id = s.current.and_then(|k| s.hits.get(k)).map(|h| h.node.clone());
+        s.hits = search::search(&self.doc, &s.query);
+        // Node ids are unique across pages (find_node relies on it too).
+        s.by_node = s.hits.iter().enumerate().map(|(k, h)| (h.node.clone(), k)).collect();
+        s.current = cur_id.and_then(|id| s.by_node.get(&id).copied());
+        s.rev = self.rev;
+        self.refresh_search_ui(ui);
+    }
+
+    /// Re-run the search if the document changed since it last ran.
+    fn sync_search(&mut self, ui: &MainWindow) {
+        if self.search.open && self.search.rev != self.rev {
+            self.run_search(ui);
+        }
+    }
+
+    fn refresh_search_ui(&self, ui: &MainWindow) {
+        let s = &self.search;
+        let rows: Vec<SearchHitVm> = s
+            .hits
+            .iter()
+            .enumerate()
+            .map(|(k, h)| SearchHitVm {
+                page: self.doc.pages.get(h.page).map(|p| p.name.clone()).unwrap_or_default().into(),
+                before: h.before.as_str().into(),
+                matched: h.matched.as_str().into(),
+                after: h.after.as_str().into(),
+                current: s.current == Some(k),
+            })
+            .collect();
+        replace_rows(&self.search_model, rows);
+        self.refresh_search_status(ui);
+    }
+
+    /// Everything but the result rows: the count, the current row, and the
+    /// node highlights. Enough on its own when only the current hit changed.
+    fn refresh_search_status(&self, ui: &MainWindow) {
+        let s = &self.search;
+        let n = s.hits.len();
+        let count = match (n, s.current) {
+            _ if s.query.trim().is_empty() => String::new(),
+            (0, _) => "No results".into(),
+            (_, Some(k)) => format!("{} of {n}", k + 1),
+            (1, None) => "1 result".into(),
+            (_, None) => format!("{n} results"),
+        };
+        ui.set_search_count(count.into());
+        ui.set_search_current(s.current.map_or(-1, |k| k as i32));
+        self.update_search_flags();
+    }
+
+    fn set_search_query(&mut self, ui: &MainWindow, query: &str) {
+        self.search.open = true;
+        if self.search.query != query {
+            self.search.query = query.to_string();
+            self.search.current = None;
+        }
+        self.run_search(ui);
+    }
+
+    /// Jump to the next (`dir` > 0) or previous hit. The first step goes to
+    /// the first hit on the active page or after it (or the last one on or
+    /// before it, going back), so a search starts where the user is.
+    fn search_step(&mut self, ui: &MainWindow, dir: i32) {
+        self.sync_search(ui);
+        let hits = &self.search.hits;
+        let n = hits.len();
+        if n == 0 {
+            return;
+        }
+        let k = match self.search.current {
+            Some(k) if dir < 0 => (k + n - 1) % n,
+            Some(k) => (k + 1) % n,
+            None if dir < 0 => hits.iter().rposition(|h| h.page <= self.active).unwrap_or(n - 1),
+            None => hits.iter().position(|h| h.page >= self.active).unwrap_or(0),
+        };
+        self.search_jump(ui, k);
+    }
+
+    /// Show hit `k`: switch to its page, select its node, and bring it into view.
+    fn search_jump(&mut self, ui: &MainWindow, k: usize) {
+        self.sync_search(ui);
+        let Some(hit) = self.search.hits.get(k) else { return };
+        let Some((p, i)) = self.find_node(&hit.node) else { return };
+        // Only the current flag of two rows changes; rebuilding every row
+        // would allocate four strings per hit.
+        let prev = self.search.current.replace(k);
+        if prev != Some(k) {
+            for (row, on) in [(prev, false), (Some(k), true)] {
+                let Some(r) = row else { continue };
+                if let Some(mut vm) = self.search_model.row_data(r) {
+                    vm.current = on;
+                    self.search_model.set_row_data(r, vm);
+                }
+            }
+        }
+        self.arrow_start = None;
+        self.link_start = None;
+        self.selected_arrow = None;
+        ui.set_connect_mode(0);
+        self.show_page(ui, p);
+        self.select(Some(i));
+        self.update_selection_flags();
+        self.refresh_search_status(ui);
+        self.reveal(ui, i);
+    }
+
+    fn close_search(&mut self, ui: &MainWindow) {
+        self.search.open = false;
+        self.search.hits.clear();
+        self.search.by_node.clear();
+        self.search.current = None;
+        self.refresh_search_ui(ui);
+    }
+
+    /// Pan to center node `i` unless it is already fully visible, zooming in
+    /// to at most 100% if it is small on screen and out if it does not fit.
+    fn reveal(&self, ui: &MainWindow, i: usize) {
+        let n = &self.nodes()[i];
+        let h = self.model.row_data(i).map_or(40.0, |v| v.h as f64);
+        let pad = 40.0;
+        let vw = ui.get_view_width() as f64;
+        let vh = ui.get_view_height() as f64;
+        if vw <= 2.0 * pad || vh <= 2.0 * pad {
+            return;
+        }
+        let fit = ((vw - 2.0 * pad) / n.width.max(1.0)).min((vh - 2.0 * pad) / h.max(1.0)).clamp(0.1, 8.0);
+        let z0 = ui.get_zoom() as f64;
+        let z = z0.max(fit.min(1.0)).min(fit);
+        let (px, py) = (ui.get_pan_x() as f64, ui.get_pan_y() as f64);
+        let visible = n.x * z0 + px >= 0.0
+            && n.y * z0 + py >= 0.0
+            && (n.x + n.width) * z0 + px <= vw
+            && (n.y + h) * z0 + py <= vh;
+        if visible && z == z0 {
+            return;
+        }
+        ui.set_zoom(z as f32);
+        ui.set_pan_x((vw / 2.0 - (n.x + n.width / 2.0) * z) as f32);
+        ui.set_pan_y((vh / 2.0 - (n.y + h / 2.0) * z) as f32);
     }
 
     /// Spatial navigation: pick the node in the given direction whose center
@@ -1580,6 +1812,8 @@ fn main() {
     ui.set_edit_col_edges(edge_model.clone().into());
     let tab_model = Rc::new(VecModel::<PageTab>::default());
     ui.set_pages(tab_model.clone().into());
+    let search_model = Rc::new(VecModel::<SearchHitVm>::default());
+    ui.set_search_results(search_model.clone().into());
 
     let app = Rc::new(RefCell::new(App {
         active: doc.start_page(),
@@ -1616,6 +1850,10 @@ fn main() {
         edge_model,
         col_resize_orig: None,
         external: HashMap::new(),
+        rev: 0,
+        search: Search::default(),
+        search_model,
+        texts: RefCell::new(HashMap::new()),
     }));
     {
         let a = app.borrow();
@@ -1633,6 +1871,7 @@ fn main() {
                 let $u = weak.unwrap();
                 let mut $a = app.borrow_mut();
                 let r = (|| $body)();
+                $a.sync_search(&$u);
                 $a.refresh_arrows();
                 $a.refresh_link_ui(&$u);
                 status(&$a, &$u);
@@ -2031,6 +2270,24 @@ fn main() {
             Some(s) => format!("node updated from {} (pid {})", s.name, s.pid),
             None => "node updated from external editor".into(),
         };
+    });
+
+    hook!(on_search_changed, |a, u, query| {
+        a.set_search_query(&u, &query);
+    });
+
+    hook!(on_search_step, |a, u, dir| {
+        a.search_step(&u, dir);
+    });
+
+    hook!(on_search_pick, |a, u, k| {
+        if let Ok(k) = usize::try_from(k) {
+            a.search_jump(&u, k);
+        }
+    });
+
+    hook!(on_search_closed, |a, u| {
+        a.close_search(&u);
     });
 
     hook!(on_external_note, |a, _u, note| {

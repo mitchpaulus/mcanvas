@@ -1,3 +1,5 @@
+import { ListView } from "std-widgets.slint";
+
 export struct LinkSegmentVm {
     arrow: int, segment: int,
     x: length, y: length, w: length, h: length,
@@ -24,6 +26,12 @@ export struct LinkVm {
     blocked: string,
 }
 
+// A search match in a node's rendered text, in canvas units relative to the
+// node's top-left corner.
+export struct MarkVm {
+    x: float, y: float, w: float, h: float,
+}
+
 export struct NodeVm {
     id: string,
     x: length,
@@ -35,7 +43,11 @@ export struct NodeVm {
     selected: bool,
     // Inside the selection rectangle being dragged.
     marquee: bool,
+    // Search: 0 not a hit, 1 a hit, 2 the hit last jumped to.
+    found: int,
     links: [LinkVm],
+    // Search matches to highlight; empty unless found > 0.
+    marks: [MarkVm],
 }
 
 // One cell of the table grid editor. r is the grid row (after span
@@ -54,6 +66,16 @@ export struct CellVm {
 export struct ColEdge {
     col: int,
     x: float,
+}
+
+// One row of the find bar's result list: the page and the matching line,
+// split around the match so it can be highlighted.
+export struct SearchHitVm {
+    page: string,
+    before: string,
+    matched: string,
+    after: string,
+    current: bool,
 }
 
 // One tab in the page strip.
@@ -85,6 +107,32 @@ component ToolButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         image-fit: contain;
         colorize: #333;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Tooltip {
+        text: @markdown("\{root.tip}");
+    }
+}
+
+// Small text button for the find bar.
+component MiniButton inherits Rectangle {
+    in property <string> label;
+    in property <string> tip;
+    callback clicked;
+
+    width: 26px;
+    border-radius: 3px;
+    background: ta.pressed ? #cfcfcb : ta.has-hover ? #e8e8e5 : transparent;
+    accessible-role: button;
+    accessible-label: tip;
+
+    Text {
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: #333;
     }
     ta := TouchArea {
         clicked => { root.clicked(); }
@@ -187,6 +235,17 @@ export component MainWindow inherits Window {
     callback key(string, bool, bool) -> bool;
     // Menu and toolbar actions, identified by name ("save", "zoom-fit", ...).
     callback command(string);
+    // Find bar. search-current is the result row last jumped to, or -1.
+    in-out property <bool> search-open;
+    in-out property <[SearchHitVm]> search-results;
+    in-out property <string> search-count;
+    in-out property <int> search-current: -1;
+    callback search-changed(string);
+    // Jump to the next (1) or previous (-1) hit, or to result row k.
+    // Call through search-go() / search-pick-row() so open edits are kept.
+    callback search-step(int);
+    callback search-pick(int);
+    callback search-closed();
 
     public function begin-edit(i: int, text: string) {
         root.edit-index = i;
@@ -207,14 +266,38 @@ export component MainWindow inherits Window {
     }
     // Commit any open editor, then run a page action, so switching pages
     // never drops text typed into a node.
-    public function page-action(op: string, i: int) {
+    function commit-edits() {
         if (root.edit-index >= 0) {
             root.commit-edit(root.edit-index, edit-input.text);
         }
         if (root.table-edit-index >= 0) {
             root.commit-table-edit();
         }
+    }
+    public function page-action(op: string, i: int) {
+        root.commit-edits();
         root.page-op(op, i);
+    }
+    // Open the find bar, or refocus it, with the last query selected.
+    public function open-search() {
+        root.search-open = true;
+        search-input.focus();
+        search-input.select-all();
+        root.search-changed(search-input.text);
+    }
+    public function close-search() {
+        root.search-open = false;
+        root.search-closed();
+        keys.focus();
+    }
+    // Jumping can switch pages, so commit open editors first.
+    public function search-go(dir: int) {
+        root.commit-edits();
+        root.search-step(dir);
+    }
+    public function search-pick-row(k: int) {
+        root.commit-edits();
+        root.search-pick(k);
     }
     // Commit an open node editor first, so its text is what the external
     // editor gets.
@@ -263,13 +346,18 @@ export component MainWindow inherits Window {
             MenuItem { title: "Link Middles"; activated => { root.command("link-middles"); } }
             MenuItem { title: "Unlink Middles"; activated => { root.command("unlink-middles"); } }
             MenuItem { title: "Delete Node or Arrow"; activated => { root.command("delete"); } }
+            MenuSeparator {}
+            MenuItem { title: "Find..."; shortcut: @keys(Control + F); activated => { root.open-search(); } }
+            // F3 / Shift+F3 are handled by the canvas key handler.
+            MenuItem { title: "Find Next (F3)"; activated => { root.search-go(1); } }
+            MenuItem { title: "Find Previous (Shift+F3)"; activated => { root.search-go(-1); } }
         }
         Menu {
             title: "View";
             MenuItem { title: "Zoom In"; shortcut: @keys(Control + Equals); activated => { root.command("zoom-in"); } }
             MenuItem { title: "Zoom Out"; shortcut: @keys(Control + HyphenMinus); activated => { root.command("zoom-out"); } }
             MenuItem { title: "Actual Size"; shortcut: @keys(Control + Digit0); activated => { root.command("zoom-100"); } }
-            MenuItem { title: "Zoom to Fit"; shortcut: @keys(Control + F); activated => { root.command("zoom-fit"); } }
+            MenuItem { title: "Zoom to Fit"; shortcut: @keys(Control + Shift + F); activated => { root.command("zoom-fit"); } }
             MenuSeparator {}
             MenuItem { title: "Reset View"; activated => { root.command("reset-view"); } }
         }
@@ -318,7 +406,9 @@ export component MainWindow inherits Window {
                 ToolButton { icon: @image-url("icons/zoom-in.svg"); tip: "Zoom in"; clicked => { root.command("zoom-in"); } }
                 ToolButton { icon: @image-url("icons/zoom-out.svg"); tip: "Zoom out"; clicked => { root.command("zoom-out"); } }
                 ToolButton { icon: @image-url("icons/zoom-100.svg"); tip: "Actual size"; clicked => { root.command("zoom-100"); } }
-                ToolButton { icon: @image-url("icons/zoom-fit.svg"); tip: "Zoom to fit"; clicked => { root.command("zoom-fit"); } }
+                ToolButton { icon: @image-url("icons/zoom-fit.svg"); tip: "Zoom to fit (Ctrl+Shift+F)"; clicked => { root.command("zoom-fit"); } }
+                Rectangle { width: 9px; Rectangle { x: 4px; y: 4px; width: 1px; height: parent.height - 8px; background: #c4c4c0; } }
+                ToolButton { active: root.search-open; icon: @image-url("icons/search.svg"); tip: "Find in all pages (Ctrl+F)"; clicked => { root.open-search(); } }
             }
         }
 
@@ -357,6 +447,10 @@ export component MainWindow inherits Window {
                     }
                     if (e.modifiers.control && e.text == Key.PageUp) {
                         root.page-action("prev", -1);
+                        return accept;
+                    }
+                    if (e.text == Key.F3 && root.search-open) {
+                        root.search-go(e.modifiers.shift ? -1 : 1);
                         return accept;
                     }
                     if (root.key(e.text, e.modifiers.control, e.modifiers.shift)) {
@@ -513,11 +607,20 @@ export component MainWindow inherits Window {
                         width: round(n.w * root.zoom / 1phx) * 1phx;
                         height: round(n.h * root.zoom / 1phx) * 1phx;
                         background: white;
-                        border-width: n.selected || n.marquee || body.has-hover || handle.has-hover ? 2px : 1px;
-                        border-color: n.selected ? #3b82f6 : n.marquee || body.has-hover || handle.has-hover ? #93c5fd : #c8c8c8;
+                        border-width: n.selected || n.marquee || n.found > 0 || body.has-hover || handle.has-hover ? 2px : 1px;
+                        border-color: n.selected ? #3b82f6 : n.marquee || body.has-hover || handle.has-hover ? #93c5fd : n.found > 0 ? #f59e0b : #c8c8c8;
                         border-radius: 3px;
                         clip: true;
 
+                        // Behind the rendered text, like a highlighter pen.
+                        for m in n.marks : Rectangle {
+                            x: m.x * root.zoom * 1px;
+                            y: m.y * root.zoom * 1px;
+                            width: m.w * root.zoom * 1px;
+                            height: m.h * root.zoom * 1px;
+                            border-radius: 2px;
+                            background: n.found == 2 ? #fdba74 : #fde68a;
+                        }
                         Image {
                             source: n.img;
                             x: 0; y: 0;
@@ -1019,6 +1122,140 @@ export component MainWindow inherits Window {
                             text: "Ctrl+Enter save   Esc cancel   right-click a cell for rows, columns, width, fill   drag dividers to resize";
                             font-size: 11px;
                             color: #8a7a2a;
+                        }
+                    }
+                }
+            }
+
+            // Find bar. A sibling of the canvas key scope, so its keys never
+            // reach the canvas shortcuts.
+            search-bar := Rectangle {
+                property <length> row-h: 36px;
+                visible: root.search-open;
+                x: parent.width - self.width - 12px;
+                y: 8px;
+                width: min(440px, parent.width - 24px);
+                height: search-col.preferred-height;
+                background: white;
+                border-width: 1px;
+                border-color: #c4c4c0;
+                border-radius: 6px;
+                drop-shadow-blur: 10px;
+                drop-shadow-color: #00000030;
+                drop-shadow-offset-y: 2px;
+                // Keep clicks and wheel events off the canvas underneath.
+                TouchArea {
+                    scroll-event(e) => { accept }
+                }
+                search-col := VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        height: 28px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-width: 1px;
+                            border-radius: 3px;
+                            border-color: search-input.has-focus ? #3b82f6 : #c8c8c8;
+                            search-input := TextInput {
+                                x: 6px;
+                                width: parent.width - 12px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                color: #222;
+                                edited => { root.search-changed(self.text); }
+                                key-pressed(e) => {
+                                    if (e.text == Key.Escape) {
+                                        root.close-search();
+                                        return accept;
+                                    }
+                                    if (e.text == Key.Return || e.text == Key.F3) {
+                                        root.search-go(e.modifiers.shift ? -1 : 1);
+                                        self.focus();
+                                        return accept;
+                                    }
+                                    if (e.text == Key.DownArrow || e.text == Key.UpArrow) {
+                                        root.search-go(e.text == Key.UpArrow ? -1 : 1);
+                                        self.focus();
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                            }
+                            if search-input.text == "" : Text {
+                                x: 6px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                text: "Find in all pages";
+                                color: #999;
+                            }
+                        }
+                        Text {
+                            text: root.search-count;
+                            min-width: 64px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            color: root.search-count == "No results" ? #b00020 : #555;
+                        }
+                        MiniButton { label: "↑"; tip: "Previous (Shift+Enter, Shift+F3)"; clicked => { root.search-go(-1); search-input.focus(); } }
+                        MiniButton { label: "↓"; tip: "Next (Enter, F3)"; clicked => { root.search-go(1); search-input.focus(); } }
+                        MiniButton { label: "✕"; tip: "Close (Esc)"; clicked => { root.close-search(); } }
+                    }
+                    // A ListView, not a Flickable with a for: it only creates
+                    // the rows in view. A one-letter query can match thousands
+                    // of nodes, and creating them all took ~55 ms per 1000.
+                    if root.search-results.length > 0 : results := ListView {
+                        property <int> cur: root.search-current;
+                        height: min(root.search-results.length * search-bar.row-h, 7.5 * search-bar.row-h);
+                        // Keep the current hit in view when stepping with Enter.
+                        changed cur => {
+                            if (self.cur >= 0) {
+                                if (self.cur * search-bar.row-h < -self.viewport-y) {
+                                    self.viewport-y = -self.cur * search-bar.row-h;
+                                } else if ((self.cur + 1) * search-bar.row-h > self.visible-height - self.viewport-y) {
+                                    self.viewport-y = self.visible-height - (self.cur + 1) * search-bar.row-h;
+                                }
+                            }
+                        }
+                        for hit[k] in root.search-results : Rectangle {
+                            height: search-bar.row-h;
+                            border-radius: 3px;
+                            background: hit.current ? #dbeafe : row-ta.has-hover ? #f1f5f4 : transparent;
+                            row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.search-pick-row(k);
+                                    search-input.focus();
+                                }
+                            }
+                            Text {
+                                x: 6px;
+                                y: 2px;
+                                width: parent.width - 12px;
+                                text: hit.page;
+                                font-size: 10px;
+                                color: #777;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                x: 6px;
+                                y: 15px;
+                                width: parent.width - 12px;
+                                height: 18px;
+                                Text { text: hit.before; font-size: 12px; color: #333; vertical-alignment: center; }
+                                Rectangle {
+                                    background: #fde68a;
+                                    border-radius: 2px;
+                                    horizontal-stretch: 0;
+                                    HorizontalLayout {
+                                        Text { text: hit.matched; font-size: 12px; font-weight: 700; color: #111; vertical-alignment: center; }
+                                    }
+                                }
+                                Text { text: hit.after; font-size: 12px; color: #333; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            }
                         }
                     }
                 }

@@ -160,7 +160,7 @@ Working:
   resets), node drag with grid snap on drop, width resize via bottom-right handle.
 - Hold Space and drag anywhere to pan, even starting on a node or arrow (grab
   cursor; only while the canvas has focus, so Space still types in editors).
-  Middle-click anywhere on the canvas zooms to fit, like Ctrl+F.
+  Middle-click anywhere on the canvas zooms to fit, like Ctrl+Shift+F.
 - Edit mode: double-click or Enter opens a raw-source box; Ctrl+Enter commits,
   Esc cancels (an empty new node is discarded on cancel).
 - Ctrl+Shift+N or double-click empty space creates a node. Delete removes the selection.
@@ -184,7 +184,7 @@ Working:
   (Ctrl+Q). Native file and "save changes?" dialogs via `rfd`. Quit and the close
   button ask Yes/No/Cancel when dirty. A reminder appears in the status bar after
   10 minutes unsaved.
-- View: zoom in/out (Ctrl+= / Ctrl+-), actual size (Ctrl+0), zoom to fit (Ctrl+F),
+- View: zoom in/out (Ctrl+= / Ctrl+-), actual size (Ctrl+0), zoom to fit (Ctrl+Shift+F; was Ctrl+F until search took it),
   reset view.
 - Node drag and resize measure the mouse in canvas coordinates (`node.x +
   mouse-x`) rather than TouchArea-local ones, since the TouchArea moves with the
@@ -281,6 +281,41 @@ Working:
   extension or (on Unix) an execute bit are refused. Directories open in the
   file manager. The blocklist cannot be complete, which is why the tooltip
   exists.
+
+- Search (2026-11-06): Ctrl+F (Edit > Find, or the magnifier in the
+  toolbar) opens a find bar at the top right of the canvas. Zoom to Fit moved
+  from Ctrl+F to Ctrl+Shift+F. It searches every page, ignoring case: a node
+  matches when every whitespace-separated term occurs in it, so markup between words (`*bold*
+  text`) does not hide a match. Searched text is the raw Typst source, table
+  cell bodies, and image paths (not page names or rendered output). Results
+  list below the box in page order, then top-to-bottom, left-to-right, each with
+  its page name and the matching line, the match highlighted. Matching nodes on
+  the current page get an amber border, and every occurrence of each term in
+  their rendered output is highlighted behind the text (orange in the hit last
+  jumped to, yellow elsewhere). The SVG has glyphs as outlines, not text, so
+  the renderer reads the text and glyph boxes from the Typst layout frame
+  instead (`TextLayout` in `src/render.rs`), as it does for link boxes. Runs that
+  do not continue each other on one line are split by a newline, so a term never
+  matches across lines or paragraphs. Which nodes match is still decided by the
+  source, so a term found only in markup (`#set`, math source like `integral`)
+  borders the node without a highlight, and text produced only by a macro is
+  highlighted only in nodes the source search already matched. Enter / Down / F3 jumps to the next hit,
+  Shift+Enter / Up / Shift+F3 to the previous one, and clicking a row jumps to
+  it. The first jump goes to the first hit on the current page or after it.
+  Jumping switches page if needed, selects the node, and pans to it only if it
+  is not fully visible (zooming in to at most 100% if it would be tiny, out if
+  it does not fit). Open editors are committed first. Results refresh whenever
+  the document changes (any undoable change, undo/redo, load) while the bar is
+  open. Esc or the close button hides the bar and the highlights; the query is
+  kept for next time. Logic and tests are in `src/search.rs`.
+  Performance (it runs on every keystroke): the results list is a `ListView`
+  so only visible rows exist (a `for` in a `Flickable` cost ~55 ms per 1000
+  hits); text is lowercased into one reused `String` with ASCII runs done in
+  bulk and searched with `str::find`, and offsets are mapped back to the
+  original only for nodes that match (a per-char `Vec` of ranges was 10-20x
+  slower); highlight boxes use a binary search over the glyphs, which are in
+  text order; hits are indexed by node id; the cached glyph boxes are 24 bytes
+  (`u32`/`f32`).
 
 - Pages (2026-09-29): tab strip under the canvas. Click to switch, double-click
   or F2 to rename, right-click for duplicate / move / delete, `+` or Ctrl+T for a
