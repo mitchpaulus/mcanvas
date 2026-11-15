@@ -1799,6 +1799,9 @@ fn main() {
         _ => Canvas::default(),
     };
 
+    // Matches installer/mcanvas.desktop so Wayland/X11 desktops show the
+    // launcher's icon and name for the window.
+    let _ = slint::set_xdg_app_id("mcanvas");
     let ui = MainWindow::new().unwrap();
     let model = Rc::new(VecModel::<NodeVm>::default());
     ui.set_nodes(model.clone().into());

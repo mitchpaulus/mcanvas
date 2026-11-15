@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=mcanvas
+GenericName=Canvas Notes
+Comment=Infinite canvas for notes and ideas
+Exec=mcanvas %f
+Icon=mcanvas
+Terminal=false
+Categories=Office;
+MimeType=application/x-mcanvas;
+StartupWMClass=mcanvas

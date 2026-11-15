@@ -1,0 +1,3 @@
+#!/usr/bin/env msh
+# Build mcanvas and install it for the current user (binary, launcher, .mc association).
+["cargo" "xtask" "install"]!

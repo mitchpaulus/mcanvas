@@ -1,0 +1,3 @@
+#!/usr/bin/env msh
+# Build the Windows NSIS setup exe (installer/mcanvas-<version>-setup.exe).
+["cargo" "xtask" "package"]!
