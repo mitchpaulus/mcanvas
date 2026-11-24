@@ -153,7 +153,10 @@ impl Renderer {
                     .pages()
                     .first()
                     .ok_or_else(|| "no pages produced".to_string())?;
-                let svg = typst_svg::svg(page, &typst_svg::SvgOptions::default());
+                let svg = escape_bare_ampersands(typst_svg::svg(
+                    page,
+                    &typst_svg::SvgOptions::default(),
+                ));
                 let mut links = Vec::new();
                 collect_links(&page.frame, Transform::identity(), &mut links);
                 let mut text = TextCollector::default();
@@ -366,6 +369,45 @@ impl World for NodeWorld<'_> {
     }
 }
 
+/// Replace every `&` that does not start an entity with `&amp;`.
+///
+/// Workaround: typst-svg 0.15 writes link URLs into `href` attributes without
+/// escaping `&`, so a URL with several query parameters yields malformed XML
+/// that the SVG loader rejects. Fixed on typst `main`; remove this once a
+/// release with the fix is in use.
+fn escape_bare_ampersands(svg: String) -> String {
+    if !svg.contains('&') {
+        return svg;
+    }
+    let mut out = String::with_capacity(svg.len() + 16);
+    let mut rest = svg.as_str();
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        out.push_str(if starts_entity(tail) { "&" } else { "&amp;" });
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `s` (the text right after an `&`) completes an entity reference:
+/// a name, `#digits` or `#xhex`, followed by `;`.
+fn starts_entity(s: &str) -> bool {
+    let Some(end) = s.bytes().take(12).position(|b| b == b';') else {
+        return false;
+    };
+    let body = &s[..end];
+    if let Some(num) = body.strip_prefix('#') {
+        match num.strip_prefix('x') {
+            Some(hex) => !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            None => !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()),
+        }
+    } else {
+        matches!(body, "amp" | "lt" | "gt" | "quot" | "apos")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +440,27 @@ mod tests {
         assert_ne!(with.svg, without.svg);
         let err = r.render(root, "#set raw(syntaxes: \"nope.sublime-syntax\")", code, 300.0).unwrap_err();
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn escapes_only_bare_ampersands() {
+        let e = |s: &str| escape_bare_ampersands(s.to_string());
+        assert_eq!(e("a?p=0&q=1&r"), "a?p=0&amp;q=1&amp;r");
+        assert_eq!(e("&amp; &quot; &#38; &#x26; &lt;"), "&amp; &quot; &#38; &#x26; &lt;");
+        assert_eq!(e("&search; &#; &"), "&amp;search; &amp;#; &amp;");
+    }
+
+    #[test]
+    fn link_with_query_params_gives_loadable_svg() {
+        let r = Renderer::new();
+        let url = "https://huggingface.co/models?p=0&search=gguf&sort=downloads";
+        let out = r
+            .render(Path::new("."), "", &format!("#link(\"{url}\")"), 400.0)
+            .unwrap();
+        assert_eq!(out.links[0].url, url);
+        assert!(out.svg.contains("p=0&amp;search=gguf&amp;sort=downloads"));
+        assert!(!out.svg.contains("&search"));
+        slint::Image::load_from_svg_data(out.svg.as_bytes()).expect("svg loads");
     }
 
     #[test]
